@@ -120,7 +120,8 @@ def get_parser():
     parser.add_argument("--split_data", type=bool_flag, default=False,
                         help="Split data across workers of a same node")
     parser.add_argument("--optimizer", type=str, default="adam,lr=0.0001",
-                        help="Optimizer (SGD / RMSprop / Adam, etc.)")
+                        help="Optimizer : Adam / AdamInverseSqrtWithWarmup / AdamCosineWithWarmup / \
+                              Adadelta / Adagrad / Adamax / ASGD / SGD / RMSprop / Adam / Rprop)")
     parser.add_argument("--clip_grad_norm", type=float, default=5,
                         help="Clip gradients norm (0 to disable)")
     parser.add_argument("--epoch_size", type=int, default=100000,
@@ -230,12 +231,7 @@ def get_parser():
     parser.add_argument("--eval_tasks", type=str, default="", 
                         help="During metalearning we need tasks on which to refine and evaluate the model after each epoch." \
                               "task_name:train_n_samples,..."
-                            )
-
-    parser.add_argument("--device", type=str, default="", 
-                        help="cpu/cuda")
-    
-    
+                            )    
     # TIM
     parser.add_argument("--tim_layers_pos", type=str, default="0,1,5", help="tim layers position : 0,1,5 for example")
     if parser.parse_known_args()[0].tim_layers_pos :
@@ -251,6 +247,9 @@ def get_parser():
     parser.add_argument("--dim_feedforward", type=int, default=512*4, 
                         help="Dimension of Intermediate Layers in Positionwise Feedforward Net")
 
+    parser.add_argument("--log_interval", type=int, default=-1, 
+                        help="Interval (number of steps) between two displays : batch_size by default")
+    parser.add_argument("--device", type=str, default="", help="cpu/cuda")
     parser.add_argument("--random_seed", type=int, default=0, help="random seed for reproductibility")
     
 
@@ -371,6 +370,8 @@ config_dic = {
     "d_v" : [int, 512], 
     "dim_feedforward" : [int, 512*4],
 
+    "log_interval":[int, -1],
+    "device" : [str, ""],
     "random_seed": [int, 0]
 }
 

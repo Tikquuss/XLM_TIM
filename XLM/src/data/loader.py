@@ -374,6 +374,7 @@ def load_data(params):
         - train / valid / test (monolingual and parallel datasets)
     """
     data = {}
+    max_train_data_size = 0
     for lgs, valeur in params.meta_params.items():
         valeur.n_gpu_per_node = params.n_gpu_per_node
         
@@ -390,7 +391,6 @@ def load_data(params):
     
         # monolingual datasets
         load_mono_data(params = valeur, data = data[lgs])
-    
         # parallel datasets
         valeur.n_gpu_per_node = params.n_gpu_per_node
         load_para_data(params = valeur, data = data[lgs])
@@ -400,11 +400,15 @@ def load_data(params):
         for lang, v in data[lgs]['mono_stream'].items():
             for data_set in v.keys():
                 logger.info('{: <18} - {: >5} - {: >12}:{: >10}'.format('Monolingual data', data_set, lang, len(v[data_set])))
+                if data_set == "train" :
+                    max_train_data_size = max(max_train_data_size, len(v[data_set]))
 
         # parallel data summary
         for (src, tgt), v in data[lgs]['para'].items():
             for data_set in v.keys():
                 logger.info('{: <18} - {: >5} - {: >12}:{: >10}'.format('Parallel data', data_set, '%s-%s' % (src, tgt), len(v[data_set])))
+                if data_set == "train" :
+                    max_train_data_size = max(max_train_data_size, len(v[data_set]))
 
         logger.info("")
     
@@ -426,4 +430,6 @@ def load_data(params):
                 break
             except :
                 pass
+            
+    params.max_train_data_size = max_train_data_size
     return data

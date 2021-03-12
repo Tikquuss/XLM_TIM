@@ -30,6 +30,7 @@ def one_epoch(trainer, params, eval_task = None) :
 
     if not params.meta_learning :
         trainer.n_sentences = 0
+        trainer.stats['progress'] = 0
         while trainer.n_sentences < trainer.epoch_size :
             # CLM steps
             for lang1, lang2 in shuf_order(params.clm_steps, params):
@@ -56,6 +57,9 @@ def one_epoch(trainer, params, eval_task = None) :
                 trainer.bt_step(lang1, lang2, lang3, params.lambda_bt)
 
             trainer.iter()
+            
+            trainer.stats['progress'] = min(int((trainer.n_sentences+1)/trainer.epoch_size*100), 100) 
+            
     else :
         # our
         trainer.n_sentences = {}
@@ -76,7 +80,8 @@ def one_epoch(trainer, params, eval_task = None) :
                 trainer.n_sentences[lgs] = trainer.epoch_size if lgs != eval_task else 0
             else :
                 trainer.n_sentences[lgs] = 0 if lgs not in params.eval_tasks else trainer.epoch_size
-                
+            
+            trainer.stats[lgs]['progress'] = 0
             # CLM
             try :
                 lang1_dic['clm_step']
@@ -175,6 +180,8 @@ def one_epoch(trainer, params, eval_task = None) :
                     flag = True
                     
             trainer.iter()  
+            for lgs in params.meta_params.keys() :
+                trainer.stats[lgs]['progress'] = min(int((trainer.n_sentences[lgs]+1)/trainer.epoch_size*100), 100) 
 
 def end_of_epoch(trainer, evaluator, params, logger, eval_task = None):
     # evaluate perplexity
@@ -223,6 +230,8 @@ def main(params):
 
     # load data
     data = load_data(params)
+    if params.epoch_size == - 1 and params.max_train_data_size != 0 :
+        params.epoch_size = params.max_train_data_size
     
     # todo : good params.n_words (We take the one from the first task have this parameter for the moment.)
     """

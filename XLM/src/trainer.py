@@ -15,7 +15,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
-import apex
+#import apex
 
 # our
 import copy
@@ -41,6 +41,11 @@ class Trainer(object):
         if self.epoch_size == -1:
             self.epoch_size = self.data
             assert self.epoch_size > 0
+        
+        self.log_interval = params.log_interval
+        if self.log_interval == -1 and not params.eval_only:
+            self.log_interval = self.params.batch_size
+        assert self.log_interval > 0 or params.eval_only
 
         # data iterators
         self.iterators = {}
@@ -70,6 +75,7 @@ class Trainer(object):
 
         # float16 / distributed (AMP)
         if params.amp >= 0:
+            import apex
             self.init_amp()
             if params.multi_gpu:
                 logger.info("Using apex.parallel.DistributedDataParallel ...")
@@ -116,7 +122,7 @@ class Trainer(object):
         if not params.meta_learning :
             self.n_sentences = 0
             self.stats = OrderedDict(
-                [('processed_s', 0), ('processed_w', 0)] +
+                [('processed_s', 0), ('processed_w', 0), ('progress', 0)] +
                 [('CLM-%s' % l, []) for l in params.langs] +
                 [('CLM-%s-%s' % (l1, l2), []) for l1, l2 in data['para'].keys()] +
                 [('CLM-%s-%s' % (l2, l1), []) for l1, l2 in data['para'].keys()] +
@@ -136,7 +142,7 @@ class Trainer(object):
             for lgs in params.meta_params.keys() :
                 self.n_sentences[lgs] = 0
                 self.stats[lgs] = OrderedDict(
-                        [('processed_s', 0), ('processed_w', 0)] +
+                        [('processed_s', 0), ('processed_w', 0), ("progress", 0)] +
                         [('CLM-%s' % l, []) for l in params.meta_params[lgs].langs] +
                         [('CLM-%s-%s' % (l1, l2), []) for l1, l2 in data[lgs]['para'].keys()] +
                         [('CLM-%s-%s' % (l2, l1), []) for l1, l2 in data[lgs]['para'].keys()] +
@@ -201,6 +207,7 @@ class Trainer(object):
         """
         Initialize AMP optimizer.
         """
+        import apex
         params = self.params
         assert params.amp == 0 and params.fp16 is False or params.amp in [1, 2, 3] and params.fp16 is True
         opt_names = self.optimizers.keys()
@@ -250,6 +257,7 @@ class Trainer(object):
 
         # AMP optimization
         else:
+            import apex
             if self.n_iter % params.accumulate_gradients == 0:
                 with apex.amp.scale_loss(loss, optimizers) as scaled_loss:
                     # our : retain_graph = retain_graph
@@ -282,7 +290,7 @@ class Trainer(object):
         """
         Print statistics about the training.
         """
-        if self.n_total_iter % 5 != 0:
+        if self.n_total_iter % self.log_interval != 0:
             return
 
         if not self.params.meta_learning :
@@ -311,8 +319,9 @@ class Trainer(object):
             self.stats['processed_w'] = 0
             self.last_time = new_time
 
-            # log speed + stats + learning rate
-            logger.info(s_iter + s_speed + s_stat + s_lr)
+            progress = str(self.stats['progress'])+"% -"
+            # log progress + speed + stats + learning rate
+            logger.info(s_iter + progress + s_speed + s_stat + s_lr)
         
         else :
             # our
@@ -350,8 +359,9 @@ class Trainer(object):
                 self.last_time = new_time
                 witness_time = diff
                 
-                # log speed + stats + learning rate
-                logger.info(task + s_iter + s_speed + s_stat + s_lr)
+                progress = str(self.stats[lgs]['progress'])+"% -"
+                # log progress + speed + stats + learning rate
+                logger.info(task + s_iter + progress + s_speed + s_stat + s_lr)
                 
 
     def get_iterator(self, iter_name, lang1, lang2, stream, data_key=None):

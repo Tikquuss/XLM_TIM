@@ -87,5 +87,7 @@
     "d_v" : 512, 
     "dim_feedforward" : 2048,
 
+    "log_interval" : "-1",
+    "device" : "cuda",
     "random_seed":0
 }
