@@ -55,13 +55,14 @@ tasks_n_samples=-1
 
 ##############################################
 
+: <<'COMMENTS'
 function abrev() {
     # todo
     result=$1
  }
 
 if [ $sub_tasks="..." ]; then
-    sub_tasks=""
+  sub_tasks=""
 	IFS=', ' read -r -a langs_array <<< "$languages"
 	# todo : sort the array in alphebical oder
 	array_length=${#langs_array[*]}
@@ -77,6 +78,7 @@ if [ $sub_tasks="..." ]; then
 	# Remove the comma in front
 	sub_tasks=$(echo $sub_tasks | cut -c2-)
 fi
+COMMENTS
 
 echo $sub_tasks
 
