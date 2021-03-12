@@ -143,6 +143,7 @@ def good_corpus(data, random_seed = 0) :
 
 def write_corpus(corpus, file_path, version = 1, random_seed = 0) :
     assert version in [1, 2]
+    corpus = [s.strip()+"\n" for s in corpus]
     with open(file_path, "w") as f :
         if version == 2 :
             f.writelines(good_corpus(corpus, random_seed))
@@ -187,7 +188,7 @@ if __name__ == '__main__':
 
     assert os.path.isfile(args.data_file)
     assert args.steps
-    steps = { int(i.split(":")[0]) : [int(k) for k in i.split(":")[1].split('-')]  for i in args.steps.split(",")}
+    steps = { int(i.split(":")[0]) : [int(k) for k in (i.split(":")[1].split('-') if len(i.split(":")) == 2 else [])]  for i in args.steps.split(",")}
     steps = { k : steps[k] for k in sorted(steps.keys()) }
     for k, v in steps.items():
         assert k in [1, 2, 3] and all([i in [1, 2] for i in v])
