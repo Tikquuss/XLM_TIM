@@ -201,6 +201,7 @@ if __name__ == '__main__':
 
     filename, file_extension = os.path.splitext(path_leaf(args.data_file))
 
+    random.seed(args.random_seed)
     print("===============")
     with open(args.data_file) as f:
         corpus = f.readlines()

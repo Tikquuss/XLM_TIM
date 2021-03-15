@@ -233,7 +233,7 @@ def get_parser():
                               "task_name:train_n_samples,..."
                             )    
     # TIM
-    parser.add_argument("--tim_layers_pos", type=str, default="0,1,5", help="tim layers position : 0,1,5 for example")
+    parser.add_argument("--tim_layers_pos", type=str, default="", help="tim layers position : 0,1,5 for example")
     if parser.parse_known_args()[0].tim_layers_pos :
         # Transformers with Independent Mechanisms (TIM) model parameters
         parser.add_argument("--n_s", type=int, default=2, help="number of mechanisms")

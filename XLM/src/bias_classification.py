@@ -30,7 +30,7 @@ class BertClassifier(nn.Module):
         # h : (batch_size, input_seq_len, d_model)
         # [CLS] : The final hidden state corresponding to this token is used as the aggregate 
         # sequence representation for classification
-        # BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding (page : todo)
+        # BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding (page : TODO)
         C = h[:, 0] #or h[:,0,:] # (batch_size, d_model)
         if self.debug_num == 0 :
             pooled_h = self.activ(self.fc(C)) # (batch_size, d_model)
