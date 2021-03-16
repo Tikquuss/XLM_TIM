@@ -424,7 +424,10 @@ class TransformerModel(nn.Module):
         i, j = 0, 0
         for k in range(self.n_layers):
             if k in self.tim_layers_pos :
-                tensor, _,_ = self.tim_layers[j](tensor, src_key_padding_mask = attn_mask)
+                src_key_padding_mask = attn_mask
+                if self.custom_mha : 
+                    src_key_padding_mask = ~attn_mask.to(torch.bool)
+                tensor, _,_ = self.tim_layers[j](tensor, src_key_padding_mask = src_key_padding_mask)
                 j += 1
             else :
                 # self attention

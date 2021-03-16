@@ -1,5 +1,5 @@
 {
-    "exp_name":"mlm_en", 
+    "exp_name":"bias_classification", 
     "exp_id":"demo", 
     "dump_path":"/content/dump_path",
     "encoder_only":"True",
@@ -12,12 +12,12 @@
     "bt_steps":"", 
     "pc_steps":"", 
     "reload_emb":"", 
-    "reload_model":"",
+    "reload_model":"/content/dump_path/mlm_en/tim/best-valid_mlm_ppl.pth",
     "reload_checkpoint":"",
     "epoch_size":"-1", 
     "max_epoch":"100", 
-    "stopping_criterion":"_valid_mlm_ppl,10", 
-    "validation_metrics":"_valid_mlm_ppl", 
+    "stopping_criterion":"val_acc,10", 
+    "validation_metrics":"val_acc", 
     "train_n_samples":"-1",
     "valid_n_samples":"-1",
     "test_n_samples":"-1",
@@ -90,5 +90,13 @@
     
     "log_interval" : "-1",
     "device" : "cuda",
-    "random_seed":0
+    "random_seed":0,
+
+    "train_data_file": "", 
+    "val_data_file":"",
+    "freeze_transformer":"False",
+    "version":"2",
+    "log_softmax":"False",
+    "softmax" : "False",
+    "shuffle":"False"
 }
