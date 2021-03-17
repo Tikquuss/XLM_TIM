@@ -235,7 +235,7 @@ def get_parser():
     # TIM
     parser.add_argument("--tim_layers_pos", type=str, default="", help="tim layers position : 0,1,5 for example")
     parser.add_argument("--use_group_comm", type=bool_flag, default=True)
-    parser.add_argument("--use_mine", type=bool_flag, default=True)
+    parser.add_argument("--use_mine", type=bool_flag, default=False)
     if parser.parse_known_args()[0].tim_layers_pos :
         # Transformers with Independent Mechanisms (TIM) model parameters
         parser.add_argument("--n_s", type=int, default=2, help="number of mechanisms")

@@ -287,12 +287,15 @@ class TransformerModel(nn.Module):
         assert self.dim % self.n_heads == 0, 'transformer dim must be a multiple of n_heads'
 
         self.tim_layers_pos = []
+        self.use_mine = params.use_mine
         if params.tim_layers_pos != ""  and not self.is_decoder:
             self.tim_layers_pos = [int(pos) for pos in params.tim_layers_pos.split(",")]
             self.n_s, self.H, self.H_c = params.n_s, params.H, params.H_c
             self.custom_mha = params.custom_mha
             self.d_k, self.d_v = params.d_k, params.d_v
-            if not self.custom_mha :
+            if not self.use_mine :
+                assert self.d_v == self.d_k == self.dim
+            elif not self.custom_mha :
                 d_mech = self.dim // self.n_s
                 self.d_k = d_mech // self.H
                 self.d_v = d_mech // self.H
@@ -326,7 +329,7 @@ class TransformerModel(nn.Module):
                 assert 0 <= layer_id <= params.n_layers - 1
                 assert pos in ['in', 'after']
                 self.memories['%i_%s' % (layer_id, pos)] = HashingMemory.build(self.dim, self.dim, params)
-        self.use_mine = params.use_mine
+        
         for layer_id in range(self.n_layers):
             if layer_id in self.tim_layers_pos :
                 if self.use_mine :
@@ -345,7 +348,7 @@ class TransformerModel(nn.Module):
                                                 dropout=self.attention_dropout,
                                                 activation= nn.GELU if params.gelu_activation else nn.ReLU,
                                                 num_modules=self.n_s,
-                                                use_group_comm= params.use_group_comm
+                                                use_group_comm = params.use_group_comm
                         )
                     )
                     _,_ = self.tim_layers[-1](src = torch.rand((1, 1, self.dim)), init_params = True)

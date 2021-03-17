@@ -266,10 +266,7 @@ class TransformerEncoderLayer(nn.Module):
         if comp is None:
             src = src + self.dropout1(output)
         else:
-            #src = src + self.dropout1(output)
             src = src + comp * self.dropout1(output)
-            #print(src.shape, comp.shape, "==============")
-            #exit()
 
         src = self.norm1(src, init_params=init_params)
 
