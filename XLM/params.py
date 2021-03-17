@@ -234,6 +234,8 @@ def get_parser():
                             )    
     # TIM
     parser.add_argument("--tim_layers_pos", type=str, default="", help="tim layers position : 0,1,5 for example")
+    parser.add_argument("--use_group_comm", type=bool_flag, default=True)
+    parser.add_argument("--use_mine", type=bool_flag, default=True)
     if parser.parse_known_args()[0].tim_layers_pos :
         # Transformers with Independent Mechanisms (TIM) model parameters
         parser.add_argument("--n_s", type=int, default=2, help="number of mechanisms")
@@ -243,6 +245,7 @@ def get_parser():
         #if parser.parse_known_args()[0].custom_mha:
         parser.add_argument("--d_k", type=int, default=512, help="key dimension")
         parser.add_argument("--d_v", type=int, default=512, help="value dimension")
+    
     
     parser.add_argument("--dim_feedforward", type=int, default=512*4, 
                         help="Dimension of Intermediate Layers in Positionwise Feedforward Net")
@@ -362,6 +365,7 @@ config_dic = {
     "eval_tasks":[str, ""],
 
     "tim_layers_pos" : [str, ""],
+    "use_group_comm":[bool, True],
     "n_s" : [int, 2],
     "H" : [int, 8],
     "H_c" : [int, 8],

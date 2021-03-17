@@ -80,6 +80,7 @@
     "asm_div_value":"4",
 
     "tim_layers_pos" : "",
+    "use_group_comm" : "True",
     "n_s" : 2,
     "H" : 8,
     "H_c" : 8,

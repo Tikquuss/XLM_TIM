@@ -570,13 +570,17 @@ class TIM_EncoderLayer(Module):
         h, attn1 = self.attn1(h, c, src_key_padding_mask, src_mask ) # (n_s, batch_size, seq_len, d_mech), (n_s, batch_size, H, seq_len, seq_len)
         h = self.dropout1(h)
 
+        # Step 4: Mechanism-wise, Position-Wise, FFN SubLayer
+        h = self.ffn(h) # (n_s, batch_size, seq_len, d_mech)
+        h = self.dropout3(h)
+
         # Step 3: Inter-mechanism Attention Sub-Layer
         h, attn2 = self.attn2(h, src_key_padding_mask, src_mask) # (n_s, batch_size, seq_len, d_mech), (n_s, batch_size, H_c, seq_len, seq_len)
         h = self.dropout2(h)
 
         # Step 4: Mechanism-wise, Position-Wise, FFN SubLayer
-        h = self.ffn(h) # (n_s, batch_size, seq_len, d_mech)
-        h = self.dropout3(h)
+        #h = self.ffn(h) # (n_s, batch_size, seq_len, d_mech)
+        #h = self.dropout3(h)
 
         h = h.permute(1, 2, 3, 0) # (batch_size, seq_len, d_mech, n_s)
         h = h.contiguous().view(batch_size, seq_len, self.d_mech * self.n_s) # (seq_len, batch_size, d_model)

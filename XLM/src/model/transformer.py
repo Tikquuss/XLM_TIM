@@ -23,6 +23,7 @@ import torch.nn.functional as F
 
 from .memory import HashingMemory
 from .tim import TIM_EncoderLayer
+from .tim_supplementary import TransformerEncoderLayer
 
 
 N_MAX_POSITIONS = 512  # maximum input sequence length
@@ -325,12 +326,29 @@ class TransformerModel(nn.Module):
                 assert 0 <= layer_id <= params.n_layers - 1
                 assert pos in ['in', 'after']
                 self.memories['%i_%s' % (layer_id, pos)] = HashingMemory.build(self.dim, self.dim, params)
-
+        self.use_mine = params.use_mine
         for layer_id in range(self.n_layers):
             if layer_id in self.tim_layers_pos :
-                self.tim_layers.append(TIM_EncoderLayer(self.dim, self.hidden_dim, self.n_s, self.d_k, self.d_v, 
-                                                        self.H, self.H_c, 
-                                                        custom_mha = None if self.custom_mha else MultiHeadAttention))
+                if self.use_mine :
+                    self.tim_layers.append(
+                        TIM_EncoderLayer(self.dim, self.hidden_dim, self.n_s, self.d_k, self.d_v, 
+                                        self.H, self.H_c, 
+                                        custom_mha = None if self.custom_mha else MultiHeadAttention)
+                    )
+                else :
+                    self.tim_layers.append(
+                        TransformerEncoderLayer(
+                                                d_ffn=self.hidden_dim,
+                                                nhead=self.n_heads,
+                                                kdim=self.d_k,
+                                                vdim=self.d_v,
+                                                dropout=self.attention_dropout,
+                                                activation= nn.GELU if params.gelu_activation else nn.ReLU,
+                                                num_modules=self.n_s,
+                                                use_group_comm= params.use_group_comm
+                        )
+                    )
+                    _,_ = self.tim_layers[-1](src = torch.rand((1, 1, self.dim)), init_params = True)
             else :
                 self.attentions.append(MultiHeadAttention(self.n_heads, self.dim, dropout=self.attention_dropout))
                 self.layer_norm1.append(nn.LayerNorm(self.dim, eps=1e-12))
@@ -425,9 +443,12 @@ class TransformerModel(nn.Module):
         for k in range(self.n_layers):
             if k in self.tim_layers_pos :
                 src_key_padding_mask = attn_mask
-                if self.custom_mha : 
+                if self.custom_mha or not self.use_mine : 
                     src_key_padding_mask = ~attn_mask.to(torch.bool)
-                tensor, _,_ = self.tim_layers[j](tensor, src_key_padding_mask = src_key_padding_mask)
+                if self.use_mine :
+                    tensor, _,_ = self.tim_layers[j](tensor, src_key_padding_mask = src_key_padding_mask)
+                else :
+                    tensor,_ = self.tim_layers[j](tensor, src_key_padding_mask = src_key_padding_mask)
                 j += 1
             else :
                 # self attention

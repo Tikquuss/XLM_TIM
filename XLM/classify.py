@@ -64,8 +64,6 @@ def main(params):
     setattr(params, "train_num_step", len(train_dataset))
     setattr(params, "train_num_data", train_dataset.n_samples)
     
-    setattr(params, "val_num_step", len(val_dataset))
-    
     if params.version == 2 :
         # If a softmax is applied to the model output, 
         # log_softmax is no longer required for the cross-entropy operation (log will be sufficient).
