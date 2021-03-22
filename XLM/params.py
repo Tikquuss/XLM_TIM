@@ -376,7 +376,17 @@ config_dic = {
 
     "log_interval":[int, -1],
     "device" : [str, ""],
-    "random_seed": [int, 0]
+    "random_seed": [int, 0],
+    
+    ######################## classify.py
+    "train_data_file": [str, ""], 
+    "val_data_file": [str, ""],
+    #"model_path": [str, ""],
+    "freeze_transformer":[bool, True],
+    "version": [int, 1],
+    "log_softmax": [bool, False],
+    "softmax" : [bool, False],
+    "shuffle":[bool, False]
 }
 
 def from_config_file(params):

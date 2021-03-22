@@ -48,7 +48,7 @@ def cleanhtml(raw_html):
 def replace_by_space(text : str, tokens : list):
     #return text.translate(str.maketrans({t : "" for t in tokens}))
     for t in tokens :
-          text = text.replace(t, "")
+        text = text.replace(t, "")
     return text
 
 def cleanpunct(w, excapt=[]):
@@ -193,7 +193,7 @@ if __name__ == '__main__':
     for k, v in steps.items():
         assert k in [1, 2, 3] and all([i in [1, 2] for i in v])
 
-    assert args.max_len > 0 and args.min_len > 0 
+    assert args.max_len > 0 and args.min_len > 0 and args.max_len_step3 > 0
     assert args.n_samples is None or args.n_samples > 0
 
     if not os.path.exists(args.output_path) :
@@ -218,8 +218,6 @@ if __name__ == '__main__':
             for v in steps[i] :
                 write_corpus(corpus, os.path.join(args.output_path, "%s%dv%d.%s"%(filename, i, v,'txt')), v, args.random_seed)
     
-    
-
         if i == 2 :
             print("\n ================= corpus2")
             corpus = preprocess_corpus(corpus, max_len = args.max_len)
@@ -238,7 +236,7 @@ if __name__ == '__main__':
             for s in tqdm.tqdm(corpus, desc="build corpus 3") :
                 l = len(s.strip().replace("\t", " ").split(" ")) 
                 if min_len <= l <= max_len :
-                   #print(s)
+                    #print(s)
                     corpus3.append(s)
                 else :
                     #print(s)

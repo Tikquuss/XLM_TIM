@@ -33,7 +33,8 @@ def main(params):
     # initialize SLURM signal handler for time limit / pre-emption
     init_signal_handler()
 
-    reloaded = torch.load(params.model_path)
+    logger.warning("Reload transformer model path from %s"%params.model_path)
+    reloaded = torch.load(params.model_path, map_location=params.device)
     model_params = AttrDict(reloaded['params'])
     logger.info("Supported languages: %s" % ", ".join(model_params.lang2id.keys()))
 
@@ -51,6 +52,8 @@ def main(params):
             param.requires_grad = False
             
     model = BertClassifier(bert = encoder, n_labels = 6, dropout=0.1, debug_num = 0)
+    
+    logger.info(model)
             
     params.lang = params.lgs
     params.lang_id = model_params.lang2id[params.lang]
@@ -58,12 +61,15 @@ def main(params):
     params.train_n_samples = None if params.train_n_samples==-1 else params.train_n_samples
     params.valid_n_samples = None if params.valid_n_samples==-1 else params.valid_n_samples
     
-    train_dataset = BiasClassificationDataset(params.train_data_file, params, dico, params.train_n_samples)
+    if not params.eval_only :
+        train_dataset = BiasClassificationDataset(params.train_data_file, params, dico, params.train_n_samples)
+        setattr(params, "train_num_step", len(train_dataset))
+        setattr(params, "train_num_data", train_dataset.n_samples)
+    else :
+        train_dataset = None
+        
     val_dataset = BiasClassificationDataset(params.val_data_file, params, dico, params.valid_n_samples)
 
-    setattr(params, "train_num_step", len(train_dataset))
-    setattr(params, "train_num_data", train_dataset.n_samples)
-    
     if params.version == 2 :
         # If a softmax is applied to the model output, 
         # log_softmax is no longer required for the cross-entropy operation (log will be sufficient).
@@ -146,15 +152,15 @@ if __name__ == '__main__':
                         help="freeze the transformer encoder part of the model")
     parser.add_argument("--softmax", type=bool_flag, default=False, 
                                 help="use softmax as last layer of bert model")
-    parser.add_argument('--version', default=2, const=2, nargs='?',
+    parser.add_argument('--version', default=1, const=1, nargs='?',
                         choices=[1, 2], 
                         help='1 : averaging the labels with the confidence scores as weights (might be noisy) \
                               2 : computed the coefficient of variation CV among in the dataset \
                               see bias_classification_loss.py for more informations about v2')
     
-    if parser.parse_known_args()[0].version == 2:
-        parser.add_argument("--log_softmax", type=bool_flag, default=False, 
-                            help="use log_softmax in the loss function instead of log")
+    #if parser.parse_known_args()[0].version == 2:
+    parser.add_argument("--log_softmax", type=bool_flag, default=False, 
+                        help="use log_softmax in the loss function instead of log")
 
     parser.add_argument("--train_data_file", type=str, default="", help="file (.csv) containing the data")
     parser.add_argument("--val_data_file", type=str, default="", help="file (.csv) containing the data")
@@ -162,14 +168,17 @@ if __name__ == '__main__':
     parser.add_argument("--shuffle", type=bool_flag, default=False, help="shuffle Dataset")
     #parser.add_argument("--group_by_size", type=bool_flag, default=True, help="Sort sentences by size during the training")
     
-    if not os.path.isfile(parser.parse_known_args()[0].reload_model) :
+    """
+    if not os.path.isfile(from_config_file(parser.parse_known_args()[0]).reload_model) :
         parser.add_argument("--model_path", type=str, default="", help="Model path")
         params = parser.parse_args()
     else :
         params = parser.parse_args()
         params.model_path = params.reload_model
-        
+    """
+    params = parser.parse_args()
     params = from_config_file(params)
+    params.model_path = params.reload_model
 
     set_seeds(params.random_seed)
 

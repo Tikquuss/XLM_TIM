@@ -215,14 +215,20 @@ class BiasClassificationDataset(Dataset):
         if self.group_by_size :
             rows = sorted(rows, key = lambda x : len(x[1]["content"].split()), reverse=False)
         for row in rows : 
+            """
             line = [row[1][col] for col in columns] # text, label1, label2, label3, conf1, conf2, conf3
-
             if False :
                 text = line[1]
                 b, c = line[2:5], line[5:8]
             else :
                 text = line[0]
                 b, c = line[1:4], line[4:7]
+            """
+            row = row[1]
+            text = row["content"]
+            b = [row['answerForQ1.Worker1'], row['answerForQ1.Worker2'], row['answerForQ1.Worker3']]
+            c = [row['answerForQ2.Worker1'], row['answerForQ2.Worker2'], row['answerForQ2.Worker3']]
+            
             s = sum(c)
             s = 1 if s == 0 else s
             if self.version == 1 :
@@ -348,14 +354,14 @@ class Trainer(object):
             logger.warning("Reload model from %s"%params.reload_model)
             assert os.path.isfile(params.reload_model)
             self.load(model_file = params.reload_model)
-
+        """
         if params.reload_checkpoint :
             self.load_checkpoint(checkpoint_path = params.reload_checkpoint)        
 
         self.checkpoint_path = os.path.join(params.dump_path, "checkpoint.pth")
         if os.path.isfile(self.checkpoint_path) :
             self.load_checkpoint()
-
+        """
         if params.freeze_transformer :
             for param in self.model.transformer.parameters():
                 param.requires_grad = False

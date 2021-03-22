@@ -257,6 +257,8 @@ def main(params):
     params.pad_index = p.pad_index
     params.unk_index = p.unk_index
     params.mask_index = p.mask_index
+    #print("p.n_words, p.bos_index, p.eos_index, p.pad_index, p.unk_index, p.mask_index")
+    #print(p.n_words, p.bos_index, p.eos_index, p.pad_index, p.unk_index, p.mask_index)
 
     # build trainer, reload potential checkpoints / build evaluator
     params_tmp = copy.deepcopy(params)

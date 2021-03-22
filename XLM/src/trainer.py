@@ -41,7 +41,7 @@ class Trainer(object):
         if self.epoch_size == -1:
             self.epoch_size = self.data
             assert self.epoch_size > 0
-        
+        # our
         self.log_interval = params.log_interval
         if self.log_interval == -1 and not params.eval_only:
             self.log_interval = self.params.batch_size
@@ -540,15 +540,15 @@ class Trainer(object):
         """
         Decide of random words to mask out, and what target they get assigned.
         """
-        
+        # TODO : add next sentence prediction
         # our
         #params = copy.deepcopy(self.params.meta_params[data_key]) if data_key else self.params
         params = self.params.meta_params[data_key] if data_key else self.params
         if data_key :
-            # todo
+            # TODO
             params.pred_probs = self.params.pred_probs
         else :
-            # todo : correct it
+            # TODO : correct it
             """
             But we think that if all the task data are based on the same vocabulary, all these parameters will be the same, 
             and therefore no problem if we choose one at random.
@@ -929,7 +929,6 @@ class Trainer(object):
             x, lengths, positions, langs, _ = self.generate_batch(lang1, lang2, 'pred')
             x, lengths, positions, langs, _ = self.round_batch(x, lengths, positions, langs)
             x, y, pred_mask = self.mask_out(x, lengths)
-
             # cuda
             x, y, pred_mask, lengths, positions, langs = to_cuda(x, y, pred_mask, lengths, positions, langs)
 
