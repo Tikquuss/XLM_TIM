@@ -79,7 +79,7 @@
 
     "train_data_file": "", 
     "val_data_file":"",
-    "freeze_transformer":"False",
+    "freeze_transformer":"True",
     "version":"1",
     "log_softmax":"False",
     "softmax" : "False",

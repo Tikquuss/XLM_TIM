@@ -13,13 +13,12 @@ import gc
 import time
 from collections import OrderedDict
 import numpy as np
+import pandas as pd
+import random
 
 #git clone https://github.com/NVIDIA/apex
 #pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./apex
 #import apex
-
-import pandas as pd
-import random
 
 #eps = torch.finfo(torch.float32).eps # 1.1920928955078125e-07
 #eps = 1e-20 # TODO : search for the smallest `eps` number under pytorch such as `torch.log(eps) != -inf`
@@ -27,12 +26,13 @@ import random
 ## Bert for classification
 class BertClassifier(nn.Module):
     """BERT model for token-level classification"""
-    def __init__(self, bert, n_labels, dropout=0.1, debug_num = 0):
+    def __init__(self, bert, n_labels, dropout=0.1, debug_num = 1):
         super().__init__()
         self.bert = bert
         d_model = bert.dim
 
         self.debug_num = debug_num
+        
         if self.debug_num == 0 :
             self.fc = nn.Linear(d_model, d_model)
             self.activ = nn.Tanh()
@@ -42,12 +42,18 @@ class BertClassifier(nn.Module):
             self.classifier = nn.Linear(d_model, n_labels)
 
     def forward(self, batch, lengths, langs):
-        h = self.bert('fwd', x=batch, lengths=lengths, langs=langs, causal=False) # (seq_len, batch_size, d_model)
-        h = h.transpose(0, 1) # (batch_size, input_seq_len, d_model)
+        #with torch.no_grad():
+        h = self.bert('fwd', x=batch, lengths=lengths, langs=langs, causal=False).contiguous() # (seq_len, batch_size, d_model)
+        
         # [CLS] : The final hidden state corresponding to this token is used as the aggregate 
         # sequence representation for classification
         # BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding (page : TODO)
-        C = h[:, 0] #or h[:,0,:] # (batch_size, d_model)
+        if True :
+            C = h[0] # (batch_size, d_model)
+        else :
+            h = h.transpose(0, 1) # (batch_size, input_seq_len, d_model)    
+            C = h[:, 0] #or h[:,0,:] # (batch_size, d_model)
+            
         if self.debug_num == 0 :
             pooled_h = self.activ(self.fc(C)) # (batch_size, d_model)
             logits = self.classifier(self.drop(pooled_h)) # (batch_size, n_labels)
@@ -174,10 +180,36 @@ class BiasClassificationLoss(nn.Module):
         elif self.reduction == "sum" :
             return torch.sum(CE)
 
+# Below is one way to bpe-ize sentences
+#codes = "" # path to the codes of the model
+def to_bpe(sentences, codes : str, fastbpe = os.path.join(os.getcwd(), 'tools/fastBPE/fast')):
+    """Sentences have to be in the BPE format, i.e. tokenized sentences on which you applied fastBPE.
+    https://github.com/facebookresearch/XLM/blob/master/generate-embeddings.ipynb"""
+    # write sentences to tmp file
+    tmp_file1 = './tmp_sentences.txt'
+    tmp_file2 = './tmp_sentences.bpe'
+    with open(tmp_file1, 'w') as fwrite:
+        for sent in sentences:
+            fwrite.write(sent + '\n')
+    
+    # apply bpe to tmp file
+    os.system('%s applybpe %s %s %s' % (fastbpe, tmp_file2, tmp_file1, codes))
+    
+    # load bpe-ized sentences
+    sentences_bpe = []
+    with open(tmp_file2) as f:
+        for line in f:
+            sentences_bpe.append(line.rstrip())
+    
+    os.remove(tmp_file1)
+    os.remove(tmp_file2)
+    
+    return sentences_bpe
+
 class BiasClassificationDataset(Dataset):
     """ Dataset class for Bias Classification"""
     labels = (0, 1, 2, 3, 4, 5)
-    def __init__(self, file, params, dico, n_samples = None):
+    def __init__(self, file, params, dico, logger, n_samples = None):
         assert params.version in [1, 2]
         self.params = params
         self.dico = dico
@@ -186,7 +218,21 @@ class BiasClassificationDataset(Dataset):
         self.group_by_size = params.group_by_size
         self.version = params.version
 
-        self.data = [inst for inst in self.get_instances(pd.read_csv(file))]
+        data = [inst for inst in self.get_instances(pd.read_csv(file))]
+        sentences, labels = zip(*data)
+        
+        # bpe-ize sentences
+        sentences = to_bpe(sentences, codes=params.codes)
+        
+        # check how many tokens are OOV
+        n_w = len([w for w in ' '.join(sentences).split()])
+        n_oov = len([w for w in ' '.join(sentences).split() if w not in dico.word2id])
+        logger.info('Number of out-of-vocab words: %s/%s' % (n_oov, n_w))
+        
+        # add </s> sentence delimiters
+        #sentences = [(('</s> %s </s>' % sent.strip()).split()) for sent in sentences]
+        
+        self.data = list(zip(sentences, labels))
         """
         if params.shuffle :
             self.data = random.shuffle(list(self.data))
@@ -258,18 +304,39 @@ class BiasClassificationDataset(Dataset):
         else :
             assert type(sentences) in [list, tuple]
         
-        word_ids = [torch.LongTensor([self.dico.index(w) for w in s.strip().split()]) for s in sentences]
-        lengths = torch.LongTensor([len(s) + 2 for s in word_ids])
-        batch = torch.LongTensor(lengths.max().item(), lengths.size(0)).fill_(self.params.pad_index)
-        batch[0] = self.params.eos_index
-        for j, s in enumerate(word_ids):
-            if lengths[j] > 2:  # if sentence not empty
-                batch[1:lengths[j] - 1, j].copy_(s)
-            batch[lengths[j] - 1, j] = self.params.eos_index
-        langs = batch.clone().fill_(self.params.lang_id)
-        
-        return batch, lengths, langs
+        # These two approaches are equivalent
+        if False :
+            word_ids = [torch.LongTensor([self.dico.index(w) for w in s.strip().split()]) for s in sentences]
+            lengths = torch.LongTensor([len(s) + 2 for s in word_ids])
+            batch = torch.LongTensor(lengths.max().item(), lengths.size(0)).fill_(self.params.pad_index)
+            batch[0] = self.params.eos_index
+            for j, s in enumerate(word_ids):
+                if lengths[j] > 2:  # if sentence not empty
+                    batch[1:lengths[j] - 1, j].copy_(s)
+                batch[lengths[j] - 1, j] = self.params.eos_index
+                
+            langs = batch.clone().fill_(self.params.lang_id)
+            
+            return batch, lengths, langs
+        else :
+            # add </s> sentence delimiters
+            sentences = [(('</s> %s </s>' % sent.strip()).split()) for sent in sentences]
+            bs = len(sentences)
+            slen = max([len(sent) for sent in sentences])
+            word_ids = torch.LongTensor(slen, bs).fill_(self.params.pad_index)
+            for i in range(bs):
+                sent = torch.LongTensor([self.dico.index(w) for w in sentences[i]])
+                word_ids[:len(sent), i] = sent
 
+            lengths = torch.LongTensor([len(sent) for sent in sentences])
+                                        
+            # NOTE: No more language id (removed it in a later version)
+            # langs = torch.LongTensor([params.lang2id[lang] for _, lang in sentences]).unsqueeze(0).expand(slen, bs) if params.n_langs > 1 else None
+            langs = None
+            
+            return word_ids, lengths, langs
+        
+        
 
 """ Training Class"""
 possib = ["%s_%s_%s"%(i, j, k) for i, j, k in itertools.product(["train", "val"], ["mlm", "nsp"], ["ppl", "acc", "loss"])]
@@ -615,7 +682,7 @@ class Trainer(object):
                 exit()
         self.save_checkpoint("checkpoint", include_optimizer=True)
         self.epoch += 1
-#############################################################
+        
     def print_stats(self):
         """
         Print statistics about the training.
@@ -696,18 +763,19 @@ class Trainer(object):
     def eval_step(self, get_loss):
         self.model.eval() # eval mode
         total_stats = []
-        #iter_bar = tqdm(self.val_data_iter, desc='Iter (val loss=X.XXX)')
-        #for i, batch in enumerate(iter_bar):
-        for batch in tqdm(self.val_data_iter, desc='val'):
-            # cuda
-            #batch = [t.to(self.device) for t in batch]
+        with torch.no_grad(): 
+            #iter_bar = tqdm(self.val_data_iter, desc='Iter (val loss=X.XXX)')
+            #for i, batch in enumerate(iter_bar):
+            for batch in tqdm(self.val_data_iter, desc='val'):
+                # cuda
+                #batch = [t.to(self.device) for t in batch]
 
-            # forward / loss
-            loss, stats = get_loss(self.model, batch)
-            loss = loss.mean() # mean() for Data Parallelism
+                # forward / loss
+                loss, stats = get_loss(self.model, batch)
+                loss = loss.mean() # mean() for Data Parallelism
 
-            total_stats.append(stats)
-            #iter_bar.set_description('Iter (val loss=%5.3f)'%loss.item())
+                total_stats.append(stats)
+                #iter_bar.set_description('Iter (val loss=%5.3f)'%loss.item())
 
         return total_stats
     

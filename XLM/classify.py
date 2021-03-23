@@ -62,14 +62,22 @@ def main(params):
     params.valid_n_samples = None if params.valid_n_samples==-1 else params.valid_n_samples
     
     if not params.eval_only :
-        train_dataset = BiasClassificationDataset(params.train_data_file, params, dico, params.train_n_samples)
+        logger.info("Loading data from %s ..."%params.train_data_file)
+        train_dataset = BiasClassificationDataset(params.train_data_file, params, dico, logger, params.train_n_samples)
         setattr(params, "train_num_step", len(train_dataset))
         setattr(params, "train_num_data", train_dataset.n_samples)
     else :
         train_dataset = None
-        
-    val_dataset = BiasClassificationDataset(params.val_data_file, params, dico, params.valid_n_samples)
+    
+    logger.info("Loading data from %s ..."%params.val_data_file)
+    val_dataset = BiasClassificationDataset(params.val_data_file, params, dico, logger, params.valid_n_samples)
 
+    logger.info("============ Data summary")
+    if not params.eval_only :
+        logger.info("train : %d"%train_dataset.n_samples)
+    logger.info("valid : %d"%val_dataset.n_samples)
+    logger.info("")
+    
     if params.version == 2 :
         # If a softmax is applied to the model output, 
         # log_softmax is no longer required for the cross-entropy operation (log will be sufficient).
@@ -78,6 +86,7 @@ def main(params):
         criterion = BiasClassificationLoss(softmax = params.log_softmax).to(params.device)
     else :
         criterion = nn.CrossEntropyLoss().to(params.device)
+        #criterion = nn.BCEWithLogitsLoss().to(params.device)
 
     lr= 1e-4
     betas=(0.9, 0.999) 
@@ -168,6 +177,7 @@ if __name__ == '__main__':
     parser.add_argument("--shuffle", type=bool_flag, default=False, help="shuffle Dataset")
     #parser.add_argument("--group_by_size", type=bool_flag, default=True, help="Sort sentences by size during the training")
     
+    parser.add_argument("--codes", type=str, required=True, help="path of bpe code")
     """
     if not os.path.isfile(from_config_file(parser.parse_known_args()[0]).reload_model) :
         parser.add_argument("--model_path", type=str, default="", help="Model path")

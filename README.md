@@ -24,7 +24,7 @@ See [HowToTrainYourMAMLPytorch](https://github.com/AntreasAntoniou/HowToTrainYou
 
 ### 4. MULTI-TASK LEARNING WITH DEEP NEURAL NETWORKS: A SURVEY ([MTL](https://arxiv.org/pdf/2009.09796.pdf))
 
-## I. Train your own (meta-)model
+## II. Train your own (meta-)model
 
 **Open the illustrative notebook in colab**[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Tikquuss/meta_XLM/blob/master/notebooks/demo/tuto.ipynb)
 
