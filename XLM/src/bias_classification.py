@@ -28,20 +28,28 @@ from .utils import truncate
 ## Bert for classification
 class BertClassifier(nn.Module):
     """BERT model for token-level classification"""
-    def __init__(self, bert, n_labels, dropout=0.1, debug_num = 1):
+    def __init__(self, bert, n_labels, dropout=0.1, debug_num = 1, hidden_dim = None, n_layers = 1, bidirectional = False):
         super().__init__()
         self.bert = bert
         d_model = bert.dim
-
-        self.debug_num = debug_num
         
+        hidden_dim = d_model if hidden_dim == -1 else hidden_dim
+        
+        self.debug_num = debug_num
         if self.debug_num == 0 :
-            self.fc = nn.Linear(d_model, d_model)
+            self.fc = nn.Linear(d_model, hidden_dim)
             self.activ = nn.Tanh()
             self.drop = nn.Dropout(dropout)
+            self.classifier = nn.Linear(hidden_dim, n_labels)
+        elif self.debug_num == 1 :
             self.classifier = nn.Linear(d_model, n_labels)
-        else :
-            self.classifier = nn.Linear(d_model, n_labels)
+        elif self.debug_num == 2 :
+            self.rnn = nn.GRU(d_model, hidden_dim, num_layers = n_layers, bidirectional = bidirectional, batch_first = True,
+                          dropout = 0 if n_layers < 2 else dropout)
+        
+            self.classifier = nn.Linear(hidden_dim * 2 if bidirectional else hidden_dim, n_labels)
+    
+            self.drop = nn.Dropout(dropout)
 
     def forward(self, batch, lengths, langs):
         #with torch.no_grad():
@@ -50,18 +58,27 @@ class BertClassifier(nn.Module):
         # [CLS] : The final hidden state corresponding to this token is used as the aggregate 
         # sequence representation for classification
         # BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding (page : TODO)
-        if True :
-            C = h[0] # (batch_size, d_model)
-        else :
-            h = h.transpose(0, 1) # (batch_size, input_seq_len, d_model)    
-            C = h[:, 0] #or h[:,0,:] # (batch_size, d_model)
+        if self.debug_num != 2 :
+            if True :
+                C = h[0] # (batch_size, d_model)
+            else :
+                h = h.transpose(0, 1) # (batch_size, input_seq_len, d_model)    
+                C = h[:, 0] #or h[:,0,:] # (batch_size, d_model)
             
         if self.debug_num == 0 :
             pooled_h = self.activ(self.fc(C)) # (batch_size, d_model)
             logits = self.classifier(self.drop(pooled_h)) # (batch_size, n_labels)
-        else :
+        elif self.debug_num == 1 :
             logits = self.classifier(C) # (batch_size, n_labels)
-
+        else :
+            h = h.transpose(0, 1) # (batch_size, input_seq_len, d_model)
+            _, hidden = self.rnn(h) # [n layers * n directions, batch size, emb dim]
+            if self.rnn.bidirectional:
+                hidden = self.drop(torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1))
+            else:
+                hidden = self.drop(hidden[-1,:,:])      
+            logits = self.classifier(hidden)
+            
         return logits
 
 def bias_classification_loss(q_c: Tensor, p_c: Tensor, reduction : str = "mean", softmax = False) -> Tensor:
@@ -184,7 +201,7 @@ class BiasClassificationLoss(nn.Module):
 
 # Below is one way to bpe-ize sentences
 #codes = "" # path to the codes of the model
-def to_bpe(sentences, codes : str, fastbpe = os.path.join(os.getcwd(), 'tools/fastBPE/fast')):
+def to_bpe(sentences, codes : str, logger, fastbpe = os.path.join(os.getcwd(), 'tools/fastBPE/fast')):
     """Sentences have to be in the BPE format, i.e. tokenized sentences on which you applied fastBPE.
     https://github.com/facebookresearch/XLM/blob/master/generate-embeddings.ipynb"""
     # write sentences to tmp file
@@ -203,6 +220,7 @@ def to_bpe(sentences, codes : str, fastbpe = os.path.join(os.getcwd(), 'tools/fa
         for line in f:
             sentences_bpe.append(line.rstrip())
     
+    logger.info("Delete %s and %s"%(tmp_file1, tmp_file2))
     os.remove(tmp_file1)
     os.remove(tmp_file2)
     
@@ -219,6 +237,7 @@ class BiasClassificationDataset(Dataset):
         self.shuffle = params.shuffle
         self.group_by_size = params.group_by_size
         self.version = params.version
+        self.in_memory = True
 
         data = [inst for inst in self.get_instances(pd.read_csv(file))]
         sentences, labels = zip(*data)
@@ -229,7 +248,7 @@ class BiasClassificationDataset(Dataset):
         logger.info('Remove %d sentences of length < %d' % (l - len(sentences), min_len))
         
         # bpe-ize sentences
-        sentences = to_bpe(sentences, codes=params.codes)
+        sentences = to_bpe(sentences, codes=params.codes, logger = logger)
         
         # check how many tokens are OOV
         n_w = len([w for w in ' '.join(sentences).split()])
@@ -251,7 +270,7 @@ class BiasClassificationDataset(Dataset):
         self.n_samples = len(data)
         self.batch_size = self.n_samples if self.params.batch_size > self.n_samples else self.params.batch_size
         
-        if True :
+        if self.in_memory :
             i = 0
             tmp = []
             while self.n_samples > i :
@@ -266,7 +285,7 @@ class BiasClassificationDataset(Dataset):
         return self.n_samples // self.batch_size
 
     def __getitem__(self, index):
-        if False :
+        if not self.in_memory :
             x, y = self.data[index]
             return self.to_tensor(x), y
         else :
@@ -312,7 +331,7 @@ class BiasClassificationDataset(Dataset):
     
     def __iter__(self): # iterator to load data
         
-        if False :
+        if not self.in_memory :
             i = 0
             data = list(self.data) # TypeError: 'generator' object is not subscriptable
             while self.n_samples > i :

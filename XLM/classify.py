@@ -70,7 +70,9 @@ def main(params):
         for param in encoder.parameters():
             param.requires_grad = False
             
-    model = BertClassifier(bert = encoder, n_labels = 6, dropout=0.1, debug_num = 0)
+    model = BertClassifier(bert = encoder, n_labels = 6, dropout=0.1, debug_num = params.debug_num,
+                           hidden_dim = params.hidden_dim, n_layers = params.gru_n_layers, 
+                           bidirectional = params.bidirectional)
     
     logger.info(model)
             
@@ -123,7 +125,7 @@ def main(params):
             
         logits = model(x.to(params.device), lengths.to(params.device), langs)
         
-        loss = criterion(logits, y) 
+        loss = criterion(logits, y.to(params.device)) 
         
         stats = {}
         n_words = x.size(0) * x.size(1)
@@ -174,7 +176,7 @@ def main(params):
             #for k in report :
             #    report["%s_%s"%(prefix, k)] = report.pop(k, None)
             #scores = {**scores, **report}
-            if False :
+            if True :
                 for k in report :
                     if k in label_dict.keys() :
                         scores["%s_class_%s"%(prefix, k)] = report.get(k, None)
@@ -224,6 +226,20 @@ if __name__ == '__main__':
     
     parser.add_argument("--min_len", type=int, default=1, 
                         help="minimun sentence length before bpe in training set")
+    
+    parser.add_argument('--debug_num', default=0, const=0, nargs='?',
+                        choices=[0, 1, 2], 
+                        help='0 : Transformer + Linear + Tanh + Dropout + Linear \
+                              1 : Transformer + Linear \
+                              2 : Transformer + GRU + Dropout + Linear')
+    #if parser.parse_known_args()[0].debug_num in [0, 2] :
+    parser.add_argument("--hidden_dim", type=int, default=-1, 
+                        help="hidden dimension of classifier")
+    
+    #if parser.parse_known_args()[0].debug_num == 2 :
+    parser.add_argument("--gru_n_layers", type=int, default=1, 
+                        help="number of layers, GRU")
+    parser.add_argument("--bidirectional", type=bool_flag, default=False, help="bidirectional GRU or not")
     
     """
     if not os.path.isfile(from_config_file(parser.parse_known_args()[0]).reload_model) :

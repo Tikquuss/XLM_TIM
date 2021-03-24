@@ -386,7 +386,11 @@ config_dic = {
     "version": [int, 1],
     "log_softmax": [bool, True],
     "shuffle":[bool, False],
-    "min_len":[int, 1]
+    "min_len":[int, 1],
+    "debug_num":[int, 0],
+    "hidden_dim":[int, -1], 
+    "gru_n_layers":[int, 1], 
+    "bidirectional":[bool, False]
 }
 
 def from_config_file(params):
