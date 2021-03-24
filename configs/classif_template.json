@@ -81,7 +81,7 @@
     "val_data_file":"",
     "freeze_transformer":"True",
     "version":"1",
-    "log_softmax":"False",
-    "softmax" : "False",
-    "shuffle":"False"
+    "log_softmax":"True",
+    "shuffle":"False",
+    "min_len":3
 }

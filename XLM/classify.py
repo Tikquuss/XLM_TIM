@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
 from torch.optim import Adam
+import torch.nn.functional as F
 #from optim import ScheduledOptim
 import os
 import numpy as np
+from sklearn.metrics import f1_score, classification_report, accuracy_score
 
 from src.slurm import init_signal_handler, init_distributed_mode
 from src.utils import initialize_exp, set_seeds
@@ -15,12 +17,29 @@ from src.utils import bool_flag
 
 from params import get_parser, from_config_file
 
+label_dict = {"0":0, "1":1, "2":2, "3" : 3, "4" : 4, "5" : 5}
+
 def get_acc(pred, label):
     arr = (np.array(pred) == np.array(label)).astype(float)
     if arr.size != 0: # check NaN 
         return arr.mean()*100
     return 0
 
+def f1_score_func(pred, label):
+    return f1_score(pred, label, average='weighted')*100
+
+# def accuracy_per_class(preds, labels, label_dict):
+#    label_dict_inverse = {v: k for k, v in label_dict.items()}
+#    labels = np.array(labels)
+#    preds = np.array(preds)
+#    r = {}
+#    for label in np.unique(labels):
+#        y_preds = preds[labels==label]
+#        y_preds = y_preds[y_preds==label]
+#        y_true = labels[labels==label]
+#        print(y_preds, y_true)
+#        r['acc_class_%s'%label_dict_inverse[label]] = len(y_preds) / len(y_true) 
+#    return r
 
 def main(params):
 
@@ -63,7 +82,8 @@ def main(params):
     
     if not params.eval_only :
         logger.info("Loading data from %s ..."%params.train_data_file)
-        train_dataset = BiasClassificationDataset(params.train_data_file, params, dico, logger, params.train_n_samples)
+        train_dataset = BiasClassificationDataset(params.train_data_file, params, dico, 
+                                                  logger, params.train_n_samples, min_len = params.min_len)
         setattr(params, "train_num_step", len(train_dataset))
         setattr(params, "train_num_data", train_dataset.n_samples)
     else :
@@ -79,10 +99,6 @@ def main(params):
     logger.info("")
     
     if params.version == 2 :
-        # If a softmax is applied to the model output, 
-        # log_softmax is no longer required for the cross-entropy operation (log will be sufficient).
-        if params.softmax :
-            assert not params.log_softmax, "Softmax is applied twice"
         criterion = BiasClassificationLoss(softmax = params.log_softmax).to(params.device)
     else :
         criterion = nn.CrossEntropyLoss().to(params.device)
@@ -112,7 +128,11 @@ def main(params):
         stats = {}
         n_words = x.size(0) * x.size(1)
         stats['n_words'] = n_words
+        stats["avg_loss"] = loss.item()
         stats["loss"] = loss.item()
+        
+        logits = F.softmax(logits, dim = -1)
+        
         if params.version == 2 :
             stats["q_c"] = logits.detach().cpu()#.numpy()
             stats["p_c"] = y.detach().cpu()#.numpy()
@@ -121,7 +141,9 @@ def main(params):
         else :
             stats["label_pred"] = logits.max(1)[1].view(-1).cpu().numpy()
             stats["label_id"] = y.view(-1).cpu().numpy()
-
+            
+        stats["avg_acc"] = get_acc(stats["label_pred"], stats["label_id"])
+        stats["acc"] = get_acc(stats["label_pred"], stats["label_id"])
         return loss, stats
     
     trainer = Trainer(params, model, optimizer, train_dataset, val_dataset, logger)
@@ -129,20 +151,43 @@ def main(params):
     def end_of_epoch(stats_list):
         scores = {}
         for prefix, total_stats in zip(["val", "train"], stats_list):
-            loss = 0
+            loss = []
             label_pred = []
             label_ids = []
             for stats in total_stats :
                 label_pred.extend(stats["label_pred"])
                 label_ids.extend(stats["label_id"])
-                loss += stats['loss']
+                loss.append(stats['loss'])
 
             scores["%s_acc"%prefix] = get_acc(label_pred, label_ids) 
+            #accuracy_score(y_true, y_pred)
+            scores["%s_f1_score_weighted"%prefix] = f1_score_func(label_pred, label_ids)
+            
+            #r = accuracy_per_class(label_pred, label_ids, label_dict)
+            #for k in r :
+            #    r["%s_%s"%(prefix, k)] = r.pop(k, None)
+            #scores = {**scores, **r}
+            
+            #report = classification_report(y_true = label_ids, y_pred = label_pred, labels=label_dict.values(), 
+            #    target_names=label_dict.keys(), sample_weight=None, digits=4, output_dict=True, zero_division='warn')
+            report = classification_report(y_true = label_ids, y_pred = label_pred, digits=4, output_dict=True)
+            #for k in report :
+            #    report["%s_%s"%(prefix, k)] = report.pop(k, None)
+            #scores = {**scores, **report}
+            if False :
+                for k in report :
+                    if k in label_dict.keys() :
+                        scores["%s_class_%s"%(prefix, k)] = report.get(k, None)
+                    else :
+                        scores["%s_%s"%(prefix, k)] = report.get(k, None)
+            
             if params.version == 2 :
                 # TODO : AP_c and MAP using stats["q_c"] and stats["p_c"] : ask Olawale | Dianbo
                 pass
-
-            scores["%s_loss"%prefix] = loss / len(total_stats)
+            
+            l = len(loss)
+            l = l if l != 0 else 1
+            scores["%s_loss"%prefix] = sum(loss) / l
 
         return scores
     
@@ -159,8 +204,6 @@ if __name__ == '__main__':
     
     parser.add_argument("--freeze_transformer", type=bool_flag, default=True, 
                         help="freeze the transformer encoder part of the model")
-    parser.add_argument("--softmax", type=bool_flag, default=False, 
-                                help="use softmax as last layer of bert model")
     parser.add_argument('--version', default=1, const=1, nargs='?',
                         choices=[1, 2], 
                         help='1 : averaging the labels with the confidence scores as weights (might be noisy) \
@@ -168,7 +211,7 @@ if __name__ == '__main__':
                               see bias_classification_loss.py for more informations about v2')
     
     #if parser.parse_known_args()[0].version == 2:
-    parser.add_argument("--log_softmax", type=bool_flag, default=False, 
+    parser.add_argument("--log_softmax", type=bool_flag, default=True, 
                         help="use log_softmax in the loss function instead of log")
 
     parser.add_argument("--train_data_file", type=str, default="", help="file (.csv) containing the data")
@@ -178,6 +221,10 @@ if __name__ == '__main__':
     #parser.add_argument("--group_by_size", type=bool_flag, default=True, help="Sort sentences by size during the training")
     
     parser.add_argument("--codes", type=str, required=True, help="path of bpe code")
+    
+    parser.add_argument("--min_len", type=int, default=1, 
+                        help="minimun sentence length before bpe in training set")
+    
     """
     if not os.path.isfile(from_config_file(parser.parse_known_args()[0]).reload_model) :
         parser.add_argument("--model_path", type=str, default="", help="Model path")
@@ -199,6 +246,7 @@ if __name__ == '__main__':
 
     # check parameters
     assert os.path.isfile(params.model_path)
-
+    assert os.path.isfile(params.codes)
+    
     # run experiment
     main(params)

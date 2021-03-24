@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 import random
 
+from .utils import truncate
+
 #git clone https://github.com/NVIDIA/apex
 #pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./apex
 #import apex
@@ -209,7 +211,7 @@ def to_bpe(sentences, codes : str, fastbpe = os.path.join(os.getcwd(), 'tools/fa
 class BiasClassificationDataset(Dataset):
     """ Dataset class for Bias Classification"""
     labels = (0, 1, 2, 3, 4, 5)
-    def __init__(self, file, params, dico, logger, n_samples = None):
+    def __init__(self, file, params, dico, logger, n_samples = None, min_len=1):
         assert params.version in [1, 2]
         self.params = params
         self.dico = dico
@@ -220,6 +222,11 @@ class BiasClassificationDataset(Dataset):
 
         data = [inst for inst in self.get_instances(pd.read_csv(file))]
         sentences, labels = zip(*data)
+        
+        # remove short sentence
+        l = len(sentences)
+        sentences = [sent for sent in sentences if len(sent.split(" ")) >= min_len]
+        logger.info('Remove %d sentences of length < %d' % (l - len(sentences), min_len))
         
         # bpe-ize sentences
         sentences = to_bpe(sentences, codes=params.codes)
@@ -232,24 +239,38 @@ class BiasClassificationDataset(Dataset):
         # add </s> sentence delimiters
         #sentences = [(('</s> %s </s>' % sent.strip()).split()) for sent in sentences]
         
-        self.data = list(zip(sentences, labels))
+        data = list(zip(sentences, labels))
         """
         if params.shuffle :
-            self.data = random.shuffle(list(self.data))
+            data = random.shuffle(list(data))
         if n_samples is not None :
-            self.data = self.data[:n_samples]
+            data = data[:n_samples]
         if params.group_by_size :
-            self.data.sort(reverse=False, key = lambda x : len(x[0].split(" ")))
+            data.sort(reverse=False, key = lambda x : len(x[0].split(" ")))
         """
-        self.n_samples = len(self.data)
+        self.n_samples = len(data)
         self.batch_size = self.n_samples if self.params.batch_size > self.n_samples else self.params.batch_size
+        
+        if True :
+            i = 0
+            tmp = []
+            while self.n_samples > i :
+                i += self.batch_size
+                x, y = zip(*data[i-self.batch_size:i])
+                tmp.append((self.to_tensor(x), torch.stack(y)))
+            self.data = tmp
+        else :
+            self.data = data
         
     def __len__(self):
         return self.n_samples // self.batch_size
 
     def __getitem__(self, index):
-        x, y = self.data[index]
-        return self.to_tensor(x), y
+        if False :
+            x, y = self.data[index]
+            return self.to_tensor(x), y
+        else :
+            return self.data[index]
     
     def get_instances(self, df):
         columns = list(df.columns[1:]) # excapt "'Unnamed: 0'"
@@ -290,13 +311,17 @@ class BiasClassificationDataset(Dataset):
                 #return text, torch.tensor(p_c, dtype=torch.float)
     
     def __iter__(self): # iterator to load data
-        i = 0
-        data = list(self.data) # TypeError: 'generator' object is not subscriptable
-        while self.n_samples > i :
-            i += self.batch_size
-            x, y = zip(*data[i-self.batch_size:i])
-
-            yield self.to_tensor(x), torch.stack(y)
+        
+        if False :
+            i = 0
+            data = list(self.data) # TypeError: 'generator' object is not subscriptable
+            while self.n_samples > i :
+                i += self.batch_size
+                x, y = zip(*data[i-self.batch_size:i])
+                yield self.to_tensor(x), torch.stack(y)
+        else :
+            for batch in self.data :
+                yield batch
             
     def to_tensor(self, sentences):
         if type(sentences) == str :
@@ -314,9 +339,8 @@ class BiasClassificationDataset(Dataset):
                 if lengths[j] > 2:  # if sentence not empty
                     batch[1:lengths[j] - 1, j].copy_(s)
                 batch[lengths[j] - 1, j] = self.params.eos_index
-                
             langs = batch.clone().fill_(self.params.lang_id)
-            
+            batch, lengths = truncate(batch, lengths, self.params.max_len, self.params.eos_index)
             return batch, lengths, langs
         else :
             # add </s> sentence delimiters
@@ -327,19 +351,18 @@ class BiasClassificationDataset(Dataset):
             for i in range(bs):
                 sent = torch.LongTensor([self.dico.index(w) for w in sentences[i]])
                 word_ids[:len(sent), i] = sent
-
             lengths = torch.LongTensor([len(sent) for sent in sentences])
-                                        
             # NOTE: No more language id (removed it in a later version)
             # langs = torch.LongTensor([params.lang2id[lang] for _, lang in sentences]).unsqueeze(0).expand(slen, bs) if params.n_langs > 1 else None
             langs = None
-            
+            word_ids, lengths = truncate(word_ids, lengths, self.params.max_len, self.params.eos_index)
             return word_ids, lengths, langs
         
         
 
 """ Training Class"""
-possib = ["%s_%s_%s"%(i, j, k) for i, j, k in itertools.product(["train", "val"], ["mlm", "nsp"], ["ppl", "acc", "loss"])]
+#possib = ["%s_%s_%s"%(i, j, k) for i, j, k in itertools.product(["train", "val"], ["mlm", "nsp"], ["ppl", "acc", "loss"])]
+possib = []
 possib.extend(["%s_%s"%(i, j) for i, j in itertools.product(["train", "val"], ["ppl", "acc", "loss"])])
 tmp_type = lambda name : "ppl" in name or "loss" in name
 
@@ -528,7 +551,10 @@ class Trainer(object):
 
     def plot_score(self, scores):
         for key, value in scores.items():
-            self.logger.info("%s -> %.6f" % (key, value))
+            try :
+                self.logger.info("%s -> %.6f" % (key, value))
+            except TypeError: #must be real number, not dict
+                self.logger.info("%s -> %s" % (key, value))
         if self.params.is_master:
             self.logger.info("__log__:%s" % json.dumps(scores))
 
@@ -696,9 +722,9 @@ class Trainer(object):
             if type(v) is list and len(v) > 0
         ])
         for k in self.stats.keys():
-            if type(self.stats[k]) is list:
-                del self.stats[k][:]
-            if "loss" in k :
+            #if type(self.stats[k]) is list:
+            #    del self.stats[k][:]
+            if ("loss" in k or "acc" in k) and (not "avg" in k) :
                 self.stats[k] = []
 
         # learning rates
@@ -749,7 +775,7 @@ class Trainer(object):
             self.stats['progress'] = min(int(((i+1)/self.params.train_num_step)*100), 100) 
 
             for name in stats.keys() :
-                if "loss" in name :
+                if "loss" in name or 'acc' in name :
                     self.stats[name] = self.stats.get(name, []) + [stats[name]]
 
             self.iter()
@@ -786,6 +812,9 @@ class Trainer(object):
             
             self.logger.info("============ Starting epoch %i ... ============" % self.epoch)
             self.n_sentences = 0
+            for k in self.stats.keys():
+                if "avg" in k :
+                    self.stats[k] = []
             train_stats = self.train_step(get_loss)
             self.logger.info("============ End of epoch %i ============" % self.epoch)
 

@@ -290,6 +290,7 @@ class TransformerModel(nn.Module):
         self.use_mine = params.use_mine
         if params.tim_layers_pos != ""  and not self.is_decoder:
             self.tim_layers_pos = [int(pos) for pos in params.tim_layers_pos.split(",")]
+            assert all([ 0 <= pos <= params.n_layers - 1 for pos in self.tim_layers_pos])
             self.n_s, self.H, self.H_c = params.n_s, params.H, params.H_c
             self.custom_mha = params.custom_mha
             self.d_k, self.d_v = params.d_k, params.d_v

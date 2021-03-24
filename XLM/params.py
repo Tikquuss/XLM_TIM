@@ -384,9 +384,9 @@ config_dic = {
     #"model_path": [str, ""],
     "freeze_transformer":[bool, True],
     "version": [int, 1],
-    "log_softmax": [bool, False],
-    "softmax" : [bool, False],
-    "shuffle":[bool, False]
+    "log_softmax": [bool, True],
+    "shuffle":[bool, False],
+    "min_len":[int, 1]
 }
 
 def from_config_file(params):
