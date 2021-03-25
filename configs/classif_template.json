@@ -87,5 +87,6 @@
     "debug_num":0,
     "hidden_dim": "-1", 
     "gru_n_layers":"1", 
-    "bidirectional":"False"
+    "bidirectional":"False",
+    "topK":3
 }

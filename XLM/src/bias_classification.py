@@ -16,188 +16,195 @@ import numpy as np
 import pandas as pd
 import random
 
-from .utils import truncate
+from .utils import truncate, AttrDict 
+from .data.dictionary import Dictionary
+from .model.transformer import TransformerModel
 
 #git clone https://github.com/NVIDIA/apex
 #pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./apex
 #import apex
 
-#eps = torch.finfo(torch.float32).eps # 1.1920928955078125e-07
-#eps = 1e-20 # TODO : search for the smallest `eps` number under pytorch such as `torch.log(eps) != -inf`
+label_dict = {"0":0, "1":1, "2":2, "3" : 3, "4" : 4, "5" : 5}
+
+class PredLayer(nn.Module):
+    """
+    Prediction layer (cross_entropy or adaptive_softmax).
+    BERT model for token-level classification
+    debug_num = 0 : Linear/AdaptiveLogSoftmaxWithLoss
+    debug_num = 1 : Linear + Tanh + Dropout + Linear/AdaptiveLogSoftmaxWithLoss
+    debug_num = 2 : GRU + Dropout + Linear/AdaptiveLogSoftmaxWithLoss
+    """
+    def __init__(self, d_model, n_labels, params):
+        super().__init__()
+        self.asm = params.asm
+        self.n_labels = n_labels
+        self.debug_num = params.debug_num
+        if self.debug_num == 0 :
+            net = [nn.Dropout(params.dropout if not params.freeze_transformer else 0)]
+            if params.asm is False:
+                net.append(nn.Linear(d_model, n_labels))
+            else :
+                in_features=d_model
+        elif self.debug_num == 1 :
+            net = [
+                nn.Dropout(params.dropout if not params.freeze_transformer else 0),
+                nn.Linear(d_model, params.hidden_dim), 
+                nn.Tanh(),
+                nn.Dropout(params.dropout)
+            ]
+            if params.asm is False:
+                net.append(nn.Linear(params.hidden_dim, n_labels))
+            else :
+                in_features=params.hidden_dim
+        elif self.debug_num == 2 :
+            self.drop = nn.Dropout(params.dropout if not params.freeze_transformer else 0)
+            self.rnn = nn.GRU(d_model, params.hidden_dim, num_layers = params.n_layers, 
+                                bidirectional = params.bidirectional, batch_first = True,
+                            dropout = 0 if params.n_layers < 2 else params.dropout)
+            
+            net = [nn.Dropout(params.dropout)]
+            if params.asm is False:
+                net.append(nn.Linear(params.hidden_dim * 2 if params.bidirectional else params.hidden_dim, 
+                                        n_labels))
+            else :
+                in_features=params.hidden_dim * 2 if params.bidirectional else params.hidden_dim
+            
+        self.proj = nn.Sequential(*net)
+        
+        if params.asm is True:
+            self.classifier = nn.AdaptiveLogSoftmaxWithLoss(
+                in_features=in_features,
+                n_classes=n_labels,
+                cutoffs=params.asm_cutoffs,
+                div_value=params.asm_div_value,
+                head_bias=True,  # default is False
+            )
+        
+        if params.asm is False :
+            if params.version == 2 :
+                if False :
+                    self.criterion = BiasClassificationLoss(softmax = params.log_softmax).to(params.device)
+                else :
+                    self.criterion = nn.BCEWithLogitsLoss().to(params.device)
+            else :
+                self.criterion = nn.CrossEntropyLoss().to(params.device)
+
+    def forward(self, x, y, get_scores=False):
+        """
+        Compute the loss, and optionally the scores.
+        """
+        if self.debug_num == 2 :
+            x = x.transpose(0, 1) # (batch_size, input_seq_len, d_model)
+            _, x = self.rnn(self.drop(x)) # [n layers * n directions, batch size, emb dim]
+            if self.rnn.bidirectional:
+                x = torch.cat((x[-2,:,:], x[-1,:,:]), dim = 1)
+            else:
+                x = x[-1,:,:]     
+            
+        x = self.proj(x)
+        
+        if self.asm is False:
+            scores = x.view(-1, self.n_labels)
+            loss = self.criterion(scores, y)
+        else:
+            _, loss = self.classifier(x, y)
+            scores = self.classifier.log_prob(x) if get_scores else None
+
+        return scores, loss
+
+    def get_scores(self, x):
+        """
+        Compute scores.
+        """
+        if self.debug_num == 2 :
+            x = x.transpose(0, 1) # (batch_size, input_seq_len, d_model)
+            _, x = self.rnn(self.drop(x)) # [n layers * n directions, batch size, emb dim]
+            if self.rnn.bidirectional:
+                x = torch.cat((x[-2,:,:], x[-1,:,:]), dim = 1)
+            else:
+                x = x[-1,:,:]     
+            
+        x = self.proj(x)
+        
+        assert x.dim() == 2
+        return self.classifier.log_prob(x) if self.asm else x
 
 ## Bert for classification
 class BertClassifier(nn.Module):
-    """BERT model for token-level classification"""
-    def __init__(self, bert, n_labels, dropout=0.1, debug_num = 1, hidden_dim = None, n_layers = 1, bidirectional = False):
+    """BERT model for token-level classification
+    debug_num = 0 : Transformer + Linear 
+    debug_num = 1 : Transformer + Linear + Tanh + Dropout + Linear
+    debug_num = 2 : Transformer + GRU + Dropout + Linear'
+    """
+    def __init__(self, n_labels, params, logger):
         super().__init__()
-        self.bert = bert
-        d_model = bert.dim
-        
-        hidden_dim = d_model if hidden_dim == -1 else hidden_dim
-        
-        self.debug_num = debug_num
-        if self.debug_num == 0 :
-            self.fc = nn.Linear(d_model, hidden_dim)
-            self.activ = nn.Tanh()
-            self.drop = nn.Dropout(dropout)
-            self.classifier = nn.Linear(hidden_dim, n_labels)
-        elif self.debug_num == 1 :
-            self.classifier = nn.Linear(d_model, n_labels)
-        elif self.debug_num == 2 :
-            self.rnn = nn.GRU(d_model, hidden_dim, num_layers = n_layers, bidirectional = bidirectional, batch_first = True,
-                          dropout = 0 if n_layers < 2 else dropout)
-        
-            self.classifier = nn.Linear(hidden_dim * 2 if bidirectional else hidden_dim, n_labels)
-    
-            self.drop = nn.Dropout(dropout)
+        logger.warning("Reload transformer model path from %s"%params.model_path)
+        reloaded = torch.load(params.model_path, map_location=params.device)
+        model_params = AttrDict(reloaded['params'])
+        logger.info("Supported languages: %s" % ", ".join(model_params.lang2id.keys()))
 
-    def forward(self, batch, lengths, langs):
-        #with torch.no_grad():
-        h = self.bert('fwd', x=batch, lengths=lengths, langs=langs, causal=False).contiguous() # (seq_len, batch_size, d_model)
+        # update dictionary parameters
+        for name in ['n_words', 'bos_index', 'eos_index', 'pad_index', 'unk_index', 'mask_index']:
+            setattr(params, name, getattr(model_params, name))
+
+        # build dictionary / build encoder / build decoder / reload weights
+        dico = Dictionary(reloaded['dico_id2word'], reloaded['dico_word2id'], reloaded['dico_counts'])
+        model = TransformerModel(model_params, dico, is_encoder=True, with_output=True).to(params.device)
+        state_dict = reloaded['model']
+        # handle models from multi-GPU checkpoints
+        if 'checkpoint' in params.model_path:
+            state_dict = {(k[7:] if k.startswith('module.') else k): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
         
+        params.max_batch_size = 0
+    
+        self.model = model
+        if params.freeze_transformer :
+            #for param in self.model.parameters():
+            #    param.requires_grad = False
+            self.model.eval()
+            
+        d_model = model.dim
+        params.hidden_dim = d_model if params.hidden_dim == -1 else params.hidden_dim
+        self.model.pred_layer = PredLayer(d_model, n_labels, params)
+        self.model.pred_layer.train()
+        
+        logger.info(self.model)
+                    
+        self.freeze_transformer = params.freeze_transformer
+        params.lang = params.lgs
+        params.lang_id = model_params.lang2id[params.lang]
+        self.dico = dico
+        self.debug_num = params.debug_num
+
+    def forward(self, x, lengths, y, positions=None, langs=None):
+        """
+        Inputs:
+            `x`        : LongTensor of shape (slen, bs)
+            `lengths`  : LongTensor of shape (bs,)
+        """
+        slen, bs = x.size()
+        assert lengths.size(0) == bs and lengths.max().item() == slen
+        if self.freeze_transformer :
+            with torch.no_grad():
+                h = self.model('fwd', x=x, lengths=lengths, positions=positions, langs=langs, causal=False)#.contiguous() # (seq_len, batch_size, d_model)
+        else :
+            h = self.model('fwd', x=x, lengths=lengths, positions=positions, langs=langs, causal=False)#.contiguous() # (seq_len, batch_size, d_model)
+            
         # [CLS] : The final hidden state corresponding to this token is used as the aggregate 
         # sequence representation for classification
         # BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding (page : TODO)
-        if self.debug_num != 2 :
-            if True :
-                C = h[0] # (batch_size, d_model)
-            else :
-                h = h.transpose(0, 1) # (batch_size, input_seq_len, d_model)    
-                C = h[:, 0] #or h[:,0,:] # (batch_size, d_model)
+        if self.debug_num != 2 :    
+            #h = h.transpose(0, 1) # (batch_size, input_seq_len, d_model)    
+            #h = h[:, 0] #or h[:,0,:] # (batch_size, d_model)
+            h = h[0] # (batch_size, d_model)
             
-        if self.debug_num == 0 :
-            pooled_h = self.activ(self.fc(C)) # (batch_size, d_model)
-            logits = self.classifier(self.drop(pooled_h)) # (batch_size, n_labels)
-        elif self.debug_num == 1 :
-            logits = self.classifier(C) # (batch_size, n_labels)
-        else :
-            h = h.transpose(0, 1) # (batch_size, input_seq_len, d_model)
-            _, hidden = self.rnn(h) # [n layers * n directions, batch size, emb dim]
-            if self.rnn.bidirectional:
-                hidden = self.drop(torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1))
-            else:
-                hidden = self.drop(hidden[-1,:,:])      
-            logits = self.classifier(hidden)
+        scores, loss = self.model.pred_layer(h, y, get_scores = True)
             
-        return logits
+        return scores, loss
 
-def bias_classification_loss(q_c: Tensor, p_c: Tensor, reduction : str = "mean", softmax = False) -> Tensor:
-    r"""assume p_c, q_c is (batch_size, num_of_classes)
-
-    We have implemented this version to be able to call it directly as torch.nn.functional.some_loss_
-    
-    mean has been used by default for reduction in Olawale | Dianbo | Yoshua paper.
-    They used log instead of log_softmax, but some q_c entries can be null if a softmax 
-    is not applied to the output of the model beforehand, resulting in an infinite loss (nan).
-
-    \begin{equation}
-        L_{model} = \frac{1}{N} \sum_{i=1}^{N} CE\bigg(p\big(x_i\big),q\big(x_i\big)\bigg)
-    \end{equation}
-    where $CE(p(x_i), q(x_i))$ is the cross entropy between $p(x_i)$ and $q(x_i)$ for the $ith$ sample, and $N$ is the size of the dataset.
-    
-    \begin{equation}
-        CE(p,q) = -\sum_{i=1}^{c}p_c(x)\log(q_c(x))
-    \end{equation}
-    
-    $q_c(x)$ is the predicted probability of sample $x$ in class $c$, equivalently, the output probabilities from the model.
-    $p_c(x)$ is the probability of sample $x$ in class $c$, equivalently, $p_c(x)$ is a $c-length$ vector with entries such that $\sum_{i=1}^{c}p_c(x)=1$. The entries of $p_c(x)$ are the normalized confidence scores of the annotators with index given by the respective voted class. As an example, for this sample with $S=(b, c) = ([4, 3, 2], [4, 3, 5])$, the bias scores of the $3$ different annotators with their confidence level is represented with an array of tuples,  $S$,where each tuple,  $(b_i,c_i)$ is the bias score $b_i$ with the associated confidence score, $c_i$ by annotator $i$. To calculate $p_c(S)$, we first normalize the confidence scores across the $3$ different annotators such that $\sum_{i=1}^{3}c_i=1$. The resulting $p_c(x)$ for the entry, is :
-    
-    \begin{align*}
-      S &= \bigg[ (4,4), (3,3), (2,5) \bigg] \\
-      S_{normalized} &=  \bigg[ (4,4/12= 0.3333), (3, 3/12=0.25), (2,5/12=0.4167) \bigg] \\
-      p_c(S) &= [ 0., 0., 0.4167, 0.25, 0.3333, 0. ]
-    \end{align*}  
-
-    >>> p_c = torch.tensor([[0, 0, 0.4166666666666667, 0.25, 0.3333333333333333, 0],
-                            [0, 0, 0.4166666666666667, 0.25, 0.3333333333333333, 0]])
-
-    >>> q_c = torch.tensor([[0.1, 0.1, 0.1, 0.1, 0.3, 0.3],
-                            [0.5, 0.2, 0, 0.1, 0.2, 0]])
-
-    >>> bias_classification_loss(q_c, p_c, softmax=True) 
-        tensor(1.8391)
-
-    >>> p_c = torch.tensor([[0.4, 0.6], [0.1, 0.9]])
-    >>> q_c = torch.tensor([[0.5, 0.5], [0.6, 0.4]])
-
-    >>> bias_classification_loss(q_c, p_c, softmax=False) 
-        tensor(0.7844)
-    """
-    assert reduction in ["mean", "sum", "none"]
-    #assert torch.equal(torch.sum(p_c, dim = 1), torch.ones(bach_size, dtype=p_c.dtype))
-    #assert torch.equal(torch.sum(q_c, dim = 1), torch.ones(bach_size, dtype=q_c.dtype))
-    if softmax :
-        CE = torch.sum(- p_c * F.log_softmax(q_c, dim = 1), dim = 1) # batch_size
-    else :
-        CE = torch.sum(- p_c * torch.log(q_c + torch.finfo(q_c.dtype).eps), dim = 1) # batch_size
-    if reduction == "none" :
-        return CE
-    elif reduction == "mean" :
-        return torch.mean(CE)
-    elif reduction == "sum" :
-        return torch.sum(CE)
-
-class BiasClassificationLoss(nn.Module):
-    r"""We have implemented this version in order to be able to do .to(devise) on the loss function, motivated by 
-    the basic loss functions in pytorch : https://pytorch.org/docs/stable/_modules/torch/nn/modules/loss.html
-    
-    mean has been used by default for reduction in Olawale | Dianbo | Yoshua paper.
-    They used log instead of log_softmax, but some q_c entries can be null if a softmax 
-    is not applied to the output of the model beforehand, resulting in an infinite loss (nan).
-
-    \begin{equation}
-        L_{model} = \frac{1}{N} \sum_{i=1}^{N} CE\bigg(p\big(x_i\big),q\big(x_i\big)\bigg)
-    \end{equation}
-    where $CE(p(x_i), q(x_i))$ is the cross entropy between $p(x_i)$ and $q(x_i)$ for the $ith$ sample, and $N$ is the size of the dataset.
-    
-    \begin{equation}
-        CE(p,q) = -\sum_{i=1}^{c}p_c(x)\log(q_c(x))
-    \end{equation}
-    
-    $q_c(x)$ is the predicted probability of sample $x$ in class $c$, equivalently, the output probabilities from the model.
-    $p_c(x)$ is the probability of sample $x$ in class $c$, equivalently, $p_c(x)$ is a $c-length$ vector with entries such that $\sum_{i=1}^{c}p_c(x)=1$. The entries of $p_c(x)$ are the normalized confidence scores of the annotators with index given by the respective voted class. As an example, for this sample with $S=(b, c) = ([4, 3, 2], [4, 3, 5])$, the bias scores of the $3$ different annotators with their confidence level is represented with an array of tuples,  $S$,where each tuple,  $(b_i,c_i)$ is the bias score $b_i$ with the associated confidence score, $c_i$ by annotator $i$. To calculate $p_c(S)$, we first normalize the confidence scores across the $3$ different annotators such that $\sum_{i=1}^{3}c_i=1$. The resulting $p_c(x)$ for the entry, is :
-    
-    \begin{align*}
-      S &= \bigg[ (4,4), (3,3), (2,5) \bigg] \\
-      S_{normalized} &=  \bigg[ (4,4/12= 0.3333), (3, 3/12=0.25), (2,5/12=0.4167) \bigg] \\
-      p_c(S) &= [ 0., 0., 0.4167, 0.25, 0.3333, 0. ]
-    \end{align*}  
-
-    >>> p_c = torch.tensor([[0, 0, 0.4166666666666667, 0.25, 0.3333333333333333, 0],
-                            [0, 0, 0.4166666666666667, 0.25, 0.3333333333333333, 0]])
-
-    >>> q_c = torch.tensor([[0.1, 0.1, 0.1, 0.1, 0.3, 0.3],
-                            [0.5, 0.2, 0, 0.1, 0.2, 0]])
-
-    >>> BiasClassificationLoss(softmax=True)(q_c, p_c) 
-        tensor(1.8391)
-
-    >>> p_c = torch.tensor([[0.4, 0.6], [0.1, 0.9]])
-    >>> q_c = torch.tensor([[0.5, 0.5], [0.6, 0.4]])
-
-    >>> BiasClassificationLoss(softmax=False)(q_c, p_c) 
-        tensor(0.7844)
-    """
-    def __init__(self, reduction: str = 'mean', softmax = False) -> None:
-        super(BiasClassificationLoss, self).__init__()
-        assert reduction in ["mean", "sum", "none"]
-        self.reduction = reduction
-        self.softmax = softmax
-    
-    def forward(self, q_c: Tensor, p_c: Tensor) -> Tensor:
-        """assume p_c, q_c is (batch_size, num_of_classes)"""
-        #assert torch.equal(torch.sum(p_c, dim = 1), torch.ones(bach_size, dtype=p_c.dtype))
-        #assert torch.equal(torch.sum(q_c, dim = 1), torch.ones(bach_size, dtype=q_c.dtype))
-        if self.softmax :
-            CE = torch.sum(- p_c * F.log_softmax(q_c, dim = 1), dim = 1) # batch_size
-        else :
-            CE = torch.sum(- p_c * torch.log(q_c + torch.finfo(q_c.dtype).eps), dim = 1) # batch_size
-        if self.reduction == "none" :
-            return CE
-        elif self.reduction == "mean" :
-            return torch.mean(CE)
-        elif self.reduction == "sum" :
-            return torch.sum(CE)
+    def parameters(self):
+        return self.model.pred_layer.parameters() if self.freeze_transformer else self.model.parameters()
 
 # Below is one way to bpe-ize sentences
 #codes = "" # path to the codes of the model
@@ -240,7 +247,7 @@ class BiasClassificationDataset(Dataset):
         self.in_memory = True
 
         data = [inst for inst in self.get_instances(pd.read_csv(file))]
-        sentences, labels = zip(*data)
+        sentences, labels1, labels2 = zip(*data)
         
         # remove short sentence
         l = len(sentences)
@@ -258,7 +265,7 @@ class BiasClassificationDataset(Dataset):
         # add </s> sentence delimiters
         #sentences = [(('</s> %s </s>' % sent.strip()).split()) for sent in sentences]
         
-        data = list(zip(sentences, labels))
+        data = list(zip(sentences, labels1, labels2))
         """
         if params.shuffle :
             data = random.shuffle(list(data))
@@ -275,8 +282,8 @@ class BiasClassificationDataset(Dataset):
             tmp = []
             while self.n_samples > i :
                 i += self.batch_size
-                x, y = zip(*data[i-self.batch_size:i])
-                tmp.append((self.to_tensor(x), torch.stack(y)))
+                x, y1, y2 = zip(*data[i-self.batch_size:i])
+                tmp.append((self.to_tensor(x), torch.stack(y1), torch.stack(y2)))
             self.data = tmp
         else :
             self.data = data
@@ -286,8 +293,8 @@ class BiasClassificationDataset(Dataset):
 
     def __getitem__(self, index):
         if not self.in_memory :
-            x, y = self.data[index]
-            return self.to_tensor(x), y
+            x, y1, y2 = self.data[index]
+            return self.to_tensor(x), y1, y2
         else :
             return self.data[index]
     
@@ -319,15 +326,16 @@ class BiasClassificationDataset(Dataset):
             s = 1 if s == 0 else s
             if self.version == 1 :
                 label = sum([ label * conf for label, conf in  zip(b, c) ])// s
-                yield text, torch.tensor(label, dtype=torch.long)
-                #return text, torch.tensor(label, dtype=torch.long)
+                label = torch.tensor(label, dtype=torch.long)
+                yield text, label, label
+                #return text, torch.tensor(label, dtype=torch.long), None
             elif self.version == 2 : 
                 p_c = [0]*6
                 for (b_i, c_i) in zip(b, c) :
                     p_c[b_i] += c_i/s
-
-                yield text, torch.tensor(p_c, dtype=torch.float)
-                #return text, torch.tensor(p_c, dtype=torch.float)
+                label = b[np.argmax(a = c)] # the class with the maximum confidence score was used as the target
+                yield text, torch.tensor(p_c, dtype=torch.float), torch.tensor(label, dtype=torch.long)
+                #return text, torch.tensor(p_c, dtype=torch.float), torch.tensor(label, dtype=torch.long)
     
     def __iter__(self): # iterator to load data
         
@@ -336,8 +344,8 @@ class BiasClassificationDataset(Dataset):
             data = list(self.data) # TypeError: 'generator' object is not subscriptable
             while self.n_samples > i :
                 i += self.batch_size
-                x, y = zip(*data[i-self.batch_size:i])
-                yield self.to_tensor(x), torch.stack(y)
+                x, y1, y2 = zip(*data[i-self.batch_size:i])
+                yield self.to_tensor(x), torch.stack(y1), torch.stack(y2)
         else :
             for batch in self.data :
                 yield batch
@@ -369,7 +377,10 @@ class BiasClassificationDataset(Dataset):
             word_ids = torch.LongTensor(slen, bs).fill_(self.params.pad_index)
             for i in range(bs):
                 sent = torch.LongTensor([self.dico.index(w) for w in sentences[i]])
+                #a = self.dico.ids_to_words(sent.numpy())
+                #print(sent, sentences[i], a)
                 word_ids[:len(sent), i] = sent
+                
             lengths = torch.LongTensor([len(sent) for sent in sentences])
             # NOTE: No more language id (removed it in a later version)
             # langs = torch.LongTensor([params.lang2id[lang] for _, lang in sentences]).unsqueeze(0).expand(slen, bs) if params.n_langs > 1 else None
@@ -377,12 +388,36 @@ class BiasClassificationDataset(Dataset):
             word_ids, lengths = truncate(word_ids, lengths, self.params.max_len, self.params.eos_index)
             return word_ids, lengths, langs
         
-        
+def load_dataset(params, logger, dico) :
+    params.train_n_samples = None if params.train_n_samples==-1 else params.train_n_samples
+    params.valid_n_samples = None if params.valid_n_samples==-1 else params.valid_n_samples
+    
+    if not params.eval_only :
+        logger.info("Loading data from %s ..."%params.train_data_file)
+        train_dataset = BiasClassificationDataset(params.train_data_file, params, dico, 
+                                                logger, params.train_n_samples, min_len = params.min_len)
+        setattr(params, "train_num_step", len(train_dataset))
+        setattr(params, "train_num_data", train_dataset.n_samples)
+    else :
+        train_dataset = None
+    
+    logger.info("")
+    logger.info("Loading data from %s ..."%params.val_data_file)
+    val_dataset = BiasClassificationDataset(params.val_data_file, params, dico, logger, params.valid_n_samples)
+
+    logger.info("")
+    logger.info("============ Data summary")
+    if not params.eval_only :
+        logger.info("train : %d"%train_dataset.n_samples)
+    logger.info("valid : %d"%val_dataset.n_samples)
+    logger.info("")
+    
+    return train_dataset, val_dataset
 
 """ Training Class"""
 #possib = ["%s_%s_%s"%(i, j, k) for i, j, k in itertools.product(["train", "val"], ["mlm", "nsp"], ["ppl", "acc", "loss"])]
 possib = []
-possib.extend(["%s_%s"%(i, j) for i, j in itertools.product(["train", "val"], ["ppl", "acc", "loss"])])
+possib.extend(["%s_%s"%(i, j) for i, j in itertools.product(["train", "val"], ["f1_score_weighted", "acc", "loss"])])
 tmp_type = lambda name : "ppl" in name or "loss" in name
 
 class Trainer(object):
@@ -452,29 +487,13 @@ class Trainer(object):
             self.log_interval = self.params.batch_size
         assert self.log_interval > 0 or params.eval_only
 
-        """
-        # models and checkpoints    
-        if params.reload_transformer :
-            logger.warning("Reload transformer model path from %s"%params.reload_transformer)
-            assert os.path.isfile(params.reload_transformer)
-            self.load(pretrain_file = params.reload_transformer)
-
-        if params.reload_model :
-            logger.warning("Reload model from %s"%params.reload_model)
-            assert os.path.isfile(params.reload_model)
-            self.load(model_file = params.reload_model)
-        """
         if params.reload_checkpoint :
             self.load_checkpoint(checkpoint_path = params.reload_checkpoint)        
 
         self.checkpoint_path = os.path.join(params.dump_path, "checkpoint.pth")
         if os.path.isfile(self.checkpoint_path) :
             self.load_checkpoint()
-        """
-        if params.freeze_transformer :
-            for param in self.model.transformer.parameters():
-                param.requires_grad = False
-        """
+    
         nb_p = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         self.logger.info(f'Found {nb_p:,} trainable parameters in model.\n')
         
@@ -483,8 +502,6 @@ class Trainer(object):
         #assert params.amp >= 0 or params.accumulate_gradients == 1
         self.model = self.model.to(self.device)
         if params.multi_gpu and params.amp == -1:
-            #self.logger.info("Using nn.DataParallel ...")
-            #self.model = nn.DataParallel(self.model)
             self.logger.info("Using nn.parallel.DistributedDataParallel ...")
             self.model = nn.parallel.DistributedDataParallel(self.model, device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True)
         
@@ -576,28 +593,6 @@ class Trainer(object):
                 self.logger.info("%s -> %s" % (key, value))
         if self.params.is_master:
             self.logger.info("__log__:%s" % json.dumps(scores))
-
-    def load(self, model_file = None, pretrain_file = None):
-        """ load saved model or pretrained transformer (a part of model) """
-        if model_file and os.path.isfile(model_file):
-            #self.logger.info('Loading the model from', model_file)
-            data = torch.load(model_file, map_location='cpu')
-            if type(data) == dict :
-                data = data["model"]
-            self.model.load_state_dict(data)
-
-        elif pretrain_file and os.path.isfile(pretrain_file): # use pretrained transformer
-            #self.logger.info('Loading the pretrained model from', pretrain_file)
-            if pretrain_file.endswith('.pth'): # pretrain model file in pytorch
-                data = torch.load(pretrain_file, map_location='cpu')
-                if type(data) == dict :
-                    data = data["model"]
-                self.model.transformer.load_state_dict(
-                    {key[12:]: # remove 'transformer.' (in 'transformer.embedding.norm.bias' for example)
-                        value
-                        for key, value in data.items()
-                        if key.startswith('transformer')} # load only transformer parts
-                ) 
 
     def save_best_model(self, scores):
         """
@@ -743,7 +738,7 @@ class Trainer(object):
         for k in self.stats.keys():
             #if type(self.stats[k]) is list:
             #    del self.stats[k][:]
-            if ("loss" in k or "acc" in k) and (not "avg" in k) :
+            if ("loss" in k or "acc" in k or 'f1_score' in k) and (not "avg" in k) :
                 self.stats[k] = []
 
         # learning rates
@@ -769,32 +764,26 @@ class Trainer(object):
     def train_step(self, get_loss):
         self.model.train() # train mode
         total_stats = []
-        #iter_bar = tqdm(self.train_data_iter, desc='Iter (train loss=X.XXX)')
 
         for i, batch in enumerate(self.train_data_iter):
 
-            # cuda
-            #batch = [t.to(self.device) for t in batch]
-
             # forward / loss
-            loss, stats = get_loss(self.model, batch)
-            loss = loss.mean() # mean() for Data Parallelism
-
+            loss, stats = get_loss(self.model, batch, self.params)
+            #loss = loss.mean() # mean() for Data Parallelism
+            
             # optimize
             self.optimize(loss)
 
             total_stats.append(stats)
-            #iter_bar.set_description('Iter (train loss=%5.3f)'%loss.item())
 
             # number of processed sentences / words
             self.n_sentences += self.params.batch_size
-            # todo
             self.stats['processed_s'] += self.params.batch_size
             self.stats['processed_w'] += stats['n_words']
             self.stats['progress'] = min(int(((i+1)/self.params.train_num_step)*100), 100) 
 
             for name in stats.keys() :
-                if "loss" in name or 'acc' in name :
+                if "loss" in name or 'acc' in name or "f1_score" in name:
                     self.stats[name] = self.stats.get(name, []) + [stats[name]]
 
             self.iter()
@@ -809,19 +798,9 @@ class Trainer(object):
         self.model.eval() # eval mode
         total_stats = []
         with torch.no_grad(): 
-            #iter_bar = tqdm(self.val_data_iter, desc='Iter (val loss=X.XXX)')
-            #for i, batch in enumerate(iter_bar):
             for batch in tqdm(self.val_data_iter, desc='val'):
-                # cuda
-                #batch = [t.to(self.device) for t in batch]
-
-                # forward / loss
-                loss, stats = get_loss(self.model, batch)
-                loss = loss.mean() # mean() for Data Parallelism
-
+                _, stats = get_loss(self.model, batch, self.params) 
                 total_stats.append(stats)
-                #iter_bar.set_description('Iter (val loss=%5.3f)'%loss.item())
-
         return total_stats
     
     def train(self, get_loss, end_of_epoch):
@@ -852,3 +831,125 @@ class Trainer(object):
         val_stats = self.eval_step(get_loss)
         scores = end_of_epoch([val_stats])
         self.plot_score(scores)
+
+#eps = torch.finfo(torch.float32).eps # 1.1920928955078125e-07
+#eps = 1e-20 # TODO : search for the smallest `eps` number under pytorch such as `torch.log(eps) != -inf`
+
+def bias_classification_loss(q_c: Tensor, p_c: Tensor, reduction : str = "mean", softmax = False) -> Tensor:
+    r"""assume p_c, q_c is (batch_size, num_of_classes)
+
+    We have implemented this version to be able to call it directly as torch.nn.functional.some_loss_
+    
+    mean has been used by default for reduction in Olawale | Dianbo | Yoshua paper.
+    They used log instead of log_softmax, but some q_c entries can be null if a softmax 
+    is not applied to the output of the model beforehand, resulting in an infinite loss (nan).
+
+    \begin{equation}
+        L_{model} = \frac{1}{N} \sum_{i=1}^{N} CE\bigg(p\big(x_i\big),q\big(x_i\big)\bigg)
+    \end{equation}
+    where $CE(p(x_i), q(x_i))$ is the cross entropy between $p(x_i)$ and $q(x_i)$ for the $ith$ sample, and $N$ is the size of the dataset.
+    
+    \begin{equation}
+        CE(p,q) = -\sum_{i=1}^{c}p_c(x)\log(q_c(x))
+    \end{equation}
+    
+    $q_c(x)$ is the predicted probability of sample $x$ in class $c$, equivalently, the output probabilities from the model.
+    $p_c(x)$ is the probability of sample $x$ in class $c$, equivalently, $p_c(x)$ is a $c-length$ vector with entries such that $\sum_{i=1}^{c}p_c(x)=1$. The entries of $p_c(x)$ are the normalized confidence scores of the annotators with index given by the respective voted class. As an example, for this sample with $S=(b, c) = ([4, 3, 2], [4, 3, 5])$, the bias scores of the $3$ different annotators with their confidence level is represented with an array of tuples,  $S$,where each tuple,  $(b_i,c_i)$ is the bias score $b_i$ with the associated confidence score, $c_i$ by annotator $i$. To calculate $p_c(S)$, we first normalize the confidence scores across the $3$ different annotators such that $\sum_{i=1}^{3}c_i=1$. The resulting $p_c(x)$ for the entry, is :
+    
+    \begin{align*}
+      S &= \bigg[ (4,4), (3,3), (2,5) \bigg] \\
+      S_{normalized} &=  \bigg[ (4,4/12= 0.3333), (3, 3/12=0.25), (2,5/12=0.4167) \bigg] \\
+      p_c(S) &= [ 0., 0., 0.4167, 0.25, 0.3333, 0. ]
+    \end{align*}  
+
+    >>> p_c = torch.tensor([[0, 0, 0.4166666666666667, 0.25, 0.3333333333333333, 0],
+                            [0, 0, 0.4166666666666667, 0.25, 0.3333333333333333, 0]])
+
+    >>> q_c = torch.tensor([[0.1, 0.1, 0.1, 0.1, 0.3, 0.3],
+                            [0.5, 0.2, 0, 0.1, 0.2, 0]])
+
+    >>> bias_classification_loss(q_c, p_c, softmax=True) 
+        tensor(1.8391)
+
+    >>> p_c = torch.tensor([[0.4, 0.6], [0.1, 0.9]])
+    >>> q_c = torch.tensor([[0.5, 0.5], [0.6, 0.4]])
+
+    >>> bias_classification_loss(q_c, p_c, softmax=False) 
+        tensor(0.7844)
+    """
+    assert reduction in ["mean", "sum", "none"]
+    #assert torch.equal(torch.sum(p_c, dim = 1), torch.ones(bach_size, dtype=p_c.dtype))
+    #assert torch.equal(torch.sum(q_c, dim = 1), torch.ones(bach_size, dtype=q_c.dtype))
+    
+    if softmax :
+        CE = torch.sum(- p_c * F.log_softmax(q_c, dim = 1), dim = 1) # batch_size
+    else :
+        CE = torch.sum(- p_c * torch.log(q_c + torch.finfo(q_c.dtype).eps), dim = 1) # batch_size
+    if reduction == "none" :
+        return CE
+    elif reduction == "mean" :
+        return torch.mean(CE)
+    elif reduction == "sum" :
+        return torch.sum(CE)
+
+class BiasClassificationLoss(nn.Module):
+    r"""We have implemented this version in order to be able to do .to(devise) on the loss function, motivated by 
+    the basic loss functions in pytorch : https://pytorch.org/docs/stable/_modules/torch/nn/modules/loss.html
+    
+    mean has been used by default for reduction in Olawale | Dianbo | Yoshua paper.
+    They used log instead of log_softmax, but some q_c entries can be null if a softmax 
+    is not applied to the output of the model beforehand, resulting in an infinite loss (nan).
+
+    \begin{equation}
+        L_{model} = \frac{1}{N} \sum_{i=1}^{N} CE\bigg(p\big(x_i\big),q\big(x_i\big)\bigg)
+    \end{equation}
+    where $CE(p(x_i), q(x_i))$ is the cross entropy between $p(x_i)$ and $q(x_i)$ for the $ith$ sample, and $N$ is the size of the dataset.
+    
+    \begin{equation}
+        CE(p,q) = -\sum_{i=1}^{c}p_c(x)\log(q_c(x))
+    \end{equation}
+    
+    $q_c(x)$ is the predicted probability of sample $x$ in class $c$, equivalently, the output probabilities from the model.
+    $p_c(x)$ is the probability of sample $x$ in class $c$, equivalently, $p_c(x)$ is a $c-length$ vector with entries such that $\sum_{i=1}^{c}p_c(x)=1$. The entries of $p_c(x)$ are the normalized confidence scores of the annotators with index given by the respective voted class. As an example, for this sample with $S=(b, c) = ([4, 3, 2], [4, 3, 5])$, the bias scores of the $3$ different annotators with their confidence level is represented with an array of tuples,  $S$,where each tuple,  $(b_i,c_i)$ is the bias score $b_i$ with the associated confidence score, $c_i$ by annotator $i$. To calculate $p_c(S)$, we first normalize the confidence scores across the $3$ different annotators such that $\sum_{i=1}^{3}c_i=1$. The resulting $p_c(x)$ for the entry, is :
+    
+    \begin{align*}
+      S &= \bigg[ (4,4), (3,3), (2,5) \bigg] \\
+      S_{normalized} &=  \bigg[ (4,4/12= 0.3333), (3, 3/12=0.25), (2,5/12=0.4167) \bigg] \\
+      p_c(S) &= [ 0., 0., 0.4167, 0.25, 0.3333, 0. ]
+    \end{align*}  
+
+    >>> p_c = torch.tensor([[0, 0, 0.4166666666666667, 0.25, 0.3333333333333333, 0],
+                            [0, 0, 0.4166666666666667, 0.25, 0.3333333333333333, 0]])
+
+    >>> q_c = torch.tensor([[0.1, 0.1, 0.1, 0.1, 0.3, 0.3],
+                            [0.5, 0.2, 0, 0.1, 0.2, 0]])
+
+    >>> BiasClassificationLoss(softmax=True)(q_c, p_c) 
+        tensor(1.8391)
+
+    >>> p_c = torch.tensor([[0.4, 0.6], [0.1, 0.9]])
+    >>> q_c = torch.tensor([[0.5, 0.5], [0.6, 0.4]])
+
+    >>> BiasClassificationLoss(softmax=False)(q_c, p_c) 
+        tensor(0.7844)
+    """
+    def __init__(self, reduction: str = 'mean', softmax = False) -> None:
+        super(BiasClassificationLoss, self).__init__()
+        assert reduction in ["mean", "sum", "none"]
+        self.reduction = reduction
+        self.softmax = softmax
+    
+    def forward(self, q_c: Tensor, p_c: Tensor) -> Tensor:
+        """assume p_c, q_c is (batch_size, num_of_classes)"""
+        #assert torch.equal(torch.sum(p_c, dim = 1), torch.ones(bach_size, dtype=p_c.dtype))
+        #assert torch.equal(torch.sum(q_c, dim = 1), torch.ones(bach_size, dtype=q_c.dtype))
+        if self.softmax :
+            CE = torch.sum(- p_c * F.log_softmax(q_c, dim = 1), dim = 1) # batch_size
+        else :
+            CE = torch.sum(- p_c * torch.log(q_c + torch.finfo(q_c.dtype).eps), dim = 1) # batch_size
+        if self.reduction == "none" :
+            return CE
+        elif self.reduction == "mean" :
+            return torch.mean(CE)
+        elif self.reduction == "sum" :
+            return torch.sum(CE)

@@ -94,6 +94,9 @@ class Dictionary(object):
             return self.word2id[word]
         else:
             return self.word2id.get(word, self.unk_index)
+        
+    def ids_to_words(self, ids : list) :
+        return " ".join([self.id2word.get(index, UNK_WORD) for index in ids])
 
     def max_vocab(self, max_vocab):
         """

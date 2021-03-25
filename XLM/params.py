@@ -390,7 +390,8 @@ config_dic = {
     "debug_num":[int, 0],
     "hidden_dim":[int, -1], 
     "gru_n_layers":[int, 1], 
-    "bidirectional":[bool, False]
+    "bidirectional":[bool, False],
+    "topK":[int, 3]
 }
 
 def from_config_file(params):
