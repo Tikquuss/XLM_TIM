@@ -19,13 +19,42 @@ import random
 from .utils import truncate, AttrDict 
 from .data.dictionary import Dictionary
 from .model.transformer import TransformerModel
+from .trainer import Trainer as MainTrainer
 
 #git clone https://github.com/NVIDIA/apex
 #pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./apex
 #import apex
 
+# bias corpus
+URL="URL"
+EMAIL="EMAIL"
+PHONE_NUMBER="PHONE"
+NUMBER="NUMBER"
+DIGIT="DIGIT"
+CUR="CUR" # currency_symbol
+special_tokens = []
+st = [URL, EMAIL, PHONE_NUMBER, NUMBER,DIGIT,CUR]
+st = [s.lower() for s in st]
+special_tokens.extend(st)
+dico_rest=4+len(special_tokens)
+
 label_dict = {"0":0, "1":1, "2":2, "3" : 3, "4" : 4, "5" : 5}
 
+class GRU(nn.Module):
+    def __init__(self, d_model, params):
+        super().__init__()
+        self.drop = nn.Dropout(params.dropout if not params.freeze_transformer else 0)
+        self.rnn = nn.GRU(d_model, params.hidden_dim, num_layers = params.n_layers, 
+                            bidirectional = params.bidirectional, batch_first = True,
+                            dropout = 0 if params.n_layers < 2 else params.dropout)
+    def forward(self, x):
+        x = x.transpose(0, 1) # (batch_size, input_seq_len, d_model)
+        _, x = self.rnn(self.drop(x)) # [n layers * n directions, batch size, emb dim]
+        if self.rnn.bidirectional:
+            return torch.cat((x[-2,:,:], x[-1,:,:]), dim = 1)
+        else:
+            return x[-1,:,:]   
+        
 class PredLayer(nn.Module):
     """
     Prediction layer (cross_entropy or adaptive_softmax).
@@ -57,18 +86,19 @@ class PredLayer(nn.Module):
             else :
                 in_features=params.hidden_dim
         elif self.debug_num == 2 :
-            self.drop = nn.Dropout(params.dropout if not params.freeze_transformer else 0)
-            self.rnn = nn.GRU(d_model, params.hidden_dim, num_layers = params.n_layers, 
-                                bidirectional = params.bidirectional, batch_first = True,
-                            dropout = 0 if params.n_layers < 2 else params.dropout)
-            
-            net = [nn.Dropout(params.dropout)]
+            net = [
+                nn.Dropout(params.dropout if not params.freeze_transformer else 0),
+                GRU(d_model, params),
+                nn.Dropout(params.dropout if params.n_layers < 2 else 0)
+            ]
             if params.asm is False:
                 net.append(nn.Linear(params.hidden_dim * 2 if params.bidirectional else params.hidden_dim, 
                                         n_labels))
             else :
                 in_features=params.hidden_dim * 2 if params.bidirectional else params.hidden_dim
-            
+        else :
+            raise NotImplementedError("debug_num = %d not found"%(self.debug_num))
+        
         self.proj = nn.Sequential(*net)
         
         if params.asm is True:
@@ -80,7 +110,7 @@ class PredLayer(nn.Module):
                 head_bias=True,  # default is False
             )
         
-        if params.asm is False :
+        else :
             if params.version == 2 :
                 if False :
                     self.criterion = BiasClassificationLoss(softmax = params.log_softmax).to(params.device)
@@ -92,17 +122,8 @@ class PredLayer(nn.Module):
     def forward(self, x, y, get_scores=False):
         """
         Compute the loss, and optionally the scores.
-        """
-        if self.debug_num == 2 :
-            x = x.transpose(0, 1) # (batch_size, input_seq_len, d_model)
-            _, x = self.rnn(self.drop(x)) # [n layers * n directions, batch size, emb dim]
-            if self.rnn.bidirectional:
-                x = torch.cat((x[-2,:,:], x[-1,:,:]), dim = 1)
-            else:
-                x = x[-1,:,:]     
-            
+        """   
         x = self.proj(x)
-        
         if self.asm is False:
             scores = x.view(-1, self.n_labels)
             loss = self.criterion(scores, y)
@@ -115,17 +136,8 @@ class PredLayer(nn.Module):
     def get_scores(self, x):
         """
         Compute scores.
-        """
-        if self.debug_num == 2 :
-            x = x.transpose(0, 1) # (batch_size, input_seq_len, d_model)
-            _, x = self.rnn(self.drop(x)) # [n layers * n directions, batch size, emb dim]
-            if self.rnn.bidirectional:
-                x = torch.cat((x[-2,:,:], x[-1,:,:]), dim = 1)
-            else:
-                x = x[-1,:,:]     
-            
+        """    
         x = self.proj(x)
-        
         assert x.dim() == 2
         return self.classifier.log_prob(x) if self.asm else x
 
@@ -138,6 +150,7 @@ class BertClassifier(nn.Module):
     """
     def __init__(self, n_labels, params, logger):
         super().__init__()
+        
         logger.warning("Reload transformer model path from %s"%params.model_path)
         reloaded = torch.load(params.model_path, map_location=params.device)
         model_params = AttrDict(reloaded['params'])
@@ -148,7 +161,7 @@ class BertClassifier(nn.Module):
             setattr(params, name, getattr(model_params, name))
 
         # build dictionary / build encoder / build decoder / reload weights
-        dico = Dictionary(reloaded['dico_id2word'], reloaded['dico_word2id'], reloaded['dico_counts'])
+        dico = Dictionary(reloaded['dico_id2word'], reloaded['dico_word2id'], reloaded['dico_counts'], rest=dico_rest)
         model = TransformerModel(model_params, dico, is_encoder=True, with_output=True).to(params.device)
         state_dict = reloaded['model']
         # handle models from multi-GPU checkpoints
@@ -160,14 +173,16 @@ class BertClassifier(nn.Module):
     
         self.model = model
         if params.freeze_transformer :
-            #for param in self.model.parameters():
-            #    param.requires_grad = False
-            self.model.eval()
+            for param in self.model.parameters():
+                param.requires_grad = False
+            #self.model.eval()
             
         d_model = model.dim
         params.hidden_dim = d_model if params.hidden_dim == -1 else params.hidden_dim
         self.model.pred_layer = PredLayer(d_model, n_labels, params)
-        self.model.pred_layer.train()
+        for param in self.model.pred_layer.parameters():
+            param.requires_grad = True
+        #self.model.pred_layer.train()
         
         logger.info(self.model)
                     
@@ -177,7 +192,7 @@ class BertClassifier(nn.Module):
         self.dico = dico
         self.debug_num = params.debug_num
 
-    def forward(self, x, lengths, y, positions=None, langs=None):
+    def forward(self, x, lengths, y, positions=None, langs=None, get_scores = True):
         """
         Inputs:
             `x`        : LongTensor of shape (slen, bs)
@@ -185,23 +200,14 @@ class BertClassifier(nn.Module):
         """
         slen, bs = x.size()
         assert lengths.size(0) == bs and lengths.max().item() == slen
+        
         if self.freeze_transformer :
             with torch.no_grad():
                 h = self.model('fwd', x=x, lengths=lengths, positions=positions, langs=langs, causal=False)#.contiguous() # (seq_len, batch_size, d_model)
         else :
             h = self.model('fwd', x=x, lengths=lengths, positions=positions, langs=langs, causal=False)#.contiguous() # (seq_len, batch_size, d_model)
-            
-        # [CLS] : The final hidden state corresponding to this token is used as the aggregate 
-        # sequence representation for classification
-        # BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding (page : TODO)
-        if self.debug_num != 2 :    
-            #h = h.transpose(0, 1) # (batch_size, input_seq_len, d_model)    
-            #h = h[:, 0] #or h[:,0,:] # (batch_size, d_model)
-            h = h[0] # (batch_size, d_model)
-            
-        scores, loss = self.model.pred_layer(h, y, get_scores = True)
-            
-        return scores, loss
+        
+        return self.model.pred_layer(h[0] if self.debug_num != 2 else h, y, get_scores = get_scores)
 
     def parameters(self):
         return self.model.pred_layer.parameters() if self.freeze_transformer else self.model.parameters()
@@ -254,6 +260,10 @@ class BiasClassificationDataset(Dataset):
         sentences = [sent for sent in sentences if len(sent.split(" ")) >= min_len]
         logger.info('Remove %d sentences of length < %d' % (l - len(sentences), min_len))
         
+        # lower
+        logger.info("Do lower...")
+        sentences = [s.lower() for s in sentences]
+        
         # bpe-ize sentences
         sentences = to_bpe(sentences, codes=params.codes, logger = logger)
         
@@ -262,18 +272,8 @@ class BiasClassificationDataset(Dataset):
         n_oov = len([w for w in ' '.join(sentences).split() if w not in dico.word2id])
         logger.info('Number of out-of-vocab words: %s/%s' % (n_oov, n_w))
         
-        # add </s> sentence delimiters
-        #sentences = [(('</s> %s </s>' % sent.strip()).split()) for sent in sentences]
-        
         data = list(zip(sentences, labels1, labels2))
-        """
-        if params.shuffle :
-            data = random.shuffle(list(data))
-        if n_samples is not None :
-            data = data[:n_samples]
-        if params.group_by_size :
-            data.sort(reverse=False, key = lambda x : len(x[0].split(" ")))
-        """
+
         self.n_samples = len(data)
         self.batch_size = self.n_samples if self.params.batch_size > self.n_samples else self.params.batch_size
         
@@ -308,15 +308,6 @@ class BiasClassificationDataset(Dataset):
         if self.group_by_size :
             rows = sorted(rows, key = lambda x : len(x[1]["content"].split()), reverse=False)
         for row in rows : 
-            """
-            line = [row[1][col] for col in columns] # text, label1, label2, label3, conf1, conf2, conf3
-            if False :
-                text = line[1]
-                b, c = line[2:5], line[5:8]
-            else :
-                text = line[0]
-                b, c = line[1:4], line[4:7]
-            """
             row = row[1]
             text = row["content"]
             b = [row['answerForQ1.Worker1'], row['answerForQ1.Worker2'], row['answerForQ1.Worker3']]
@@ -328,23 +319,19 @@ class BiasClassificationDataset(Dataset):
                 label = sum([ label * conf for label, conf in  zip(b, c) ])// s
                 label = torch.tensor(label, dtype=torch.long)
                 yield text, label, label
-                #return text, torch.tensor(label, dtype=torch.long), None
             elif self.version == 2 : 
                 p_c = [0]*6
                 for (b_i, c_i) in zip(b, c) :
                     p_c[b_i] += c_i/s
                 label = b[np.argmax(a = c)] # the class with the maximum confidence score was used as the target
                 yield text, torch.tensor(p_c, dtype=torch.float), torch.tensor(label, dtype=torch.long)
-                #return text, torch.tensor(p_c, dtype=torch.float), torch.tensor(label, dtype=torch.long)
-    
+                
     def __iter__(self): # iterator to load data
-        
         if not self.in_memory :
             i = 0
-            data = list(self.data) # TypeError: 'generator' object is not subscriptable
             while self.n_samples > i :
                 i += self.batch_size
-                x, y1, y2 = zip(*data[i-self.batch_size:i])
+                x, y1, y2 = zip(*self.data[i-self.batch_size:i])
                 yield self.to_tensor(x), torch.stack(y1), torch.stack(y2)
         else :
             for batch in self.data :
@@ -423,7 +410,6 @@ tmp_type = lambda name : "ppl" in name or "loss" in name
 class Trainer(object):
     """Training Helper Class"""
     def __init__(self, params, model, optimizer, train_data_iter, val_data_iter, logger):
-        
         self.params = params
         self.model = model
         self.optimizer = optimizer # optim
@@ -818,7 +804,7 @@ class Trainer(object):
 
             val_stats = self.eval_step(get_loss)
 
-            scores = end_of_epoch([train_stats, val_stats])
+            scores = end_of_epoch([val_stats, train_stats])
             self.plot_score(scores)
 
             # end of epoch

@@ -22,30 +22,46 @@ def get_acc(pred, label):
     return 0
 
 def f1_score_func(pred, label):
-    return f1_score(pred, label, average='weighted')*100
+    # https://stackoverflow.com/questions/43162506/undefinedmetricwarning-f-score-is-ill-defined-and-being-set-to-0-0-in-labels-wi
+    return f1_score(pred, label, average='weighted', labels=np.unique(pred))*100
 
 def top_k(logits, y, k : int = 1):
     """
     logits : (bs, n_labels)
     y : (bs,)
     """
-    assert 1 <= k <= logits.size(1)
-    k_labels = torch.topk(input = logits, k = k, dim=1, largest=True, sorted=True)[1]
-    a = ~torch.prod(input = torch.abs(y.unsqueeze(1) - k_labels), dim=1).to(torch.bool)
+    labels_dim = 1
+    assert 1 <= k <= logits.size(labels_dim)
     
-    y_pred = torch.empty_like(y)
-    for i in range(y.size(0)):
-        if a[i] :
-            y_pred[i] = y[i]
-        else :
-            y_pred[i] = k_labels[i][0]
+    k_labels = torch.topk(input = logits, k = k, dim=labels_dim, largest=True, sorted=True)[1]
 
-    f1 = f1_score(y_pred, y, average='weighted')*100
-    acc = accuracy_score(y_pred, y)*100
-
-    #correct = a.to(torch.int8).numpy()
+    # True (#0) if `expected label` in k_labels, False (0) if not
+    a = ~torch.prod(input = torch.abs(y.unsqueeze(labels_dim) - k_labels), dim=labels_dim).to(torch.bool)
+    
+    # These two approaches are equivalent
+    if False :
+        y_pred = torch.empty_like(y)
+        for i in range(y.size(0)):
+            if a[i] :
+                y_pred[i] = y[i]
+            else :
+                y_pred[i] = k_labels[i][0]
+        #correct = a.to(torch.int8).numpy()
+    else :
+        a = a.to(torch.int8)
+        y_pred = a * y + (1-a) * k_labels[:,0]
+        #correct = a.numpy()
+    
+    y_pred = y_pred.cpu().numpy()
+    #f1 = f1_score(y_pred, y, average='weighted')*100
+    f1 = f1_score_func(y_pred, y)
     #acc = sum(correct)/len(correct)*100
-
+    #acc = accuracy_score(y_pred, y)*100
+    acc = get_acc(y_pred, y)
+    #print("============")
+    #print(logits.max(1)[1], y_pred)
+    #print(logits.shape, y.shape)
+    #print(logits, y, k, k_labels, y_pred, a)
     return acc, f1, y_pred
 
 def get_loss(model, batch, params): 
@@ -61,15 +77,16 @@ def get_loss(model, batch, params):
     stats = {}
     n_words = lengths.sum().item()
     stats['n_words'] = n_words
+    #stats["xe_loss"] = loss.item() * 6
     stats["avg_loss"] = loss.item()
     stats["loss"] = loss.item()
         
     logits = F.softmax(logits, dim = -1)
-    stats["label_pred"] = logits.max(1)[1].view(-1).cpu().numpy()
+    stats["label_pred"] = logits.max(1)[1].view(-1).detach().cpu().numpy()
     stats["label_id"] = y2.view(-1).numpy()
         
     for k in range(1, params.topK+1):
-        k_acc, k_f1, y_pred = top_k(logits = logits.detach(), y=y2, k=k)
+        k_acc, k_f1, y_pred = top_k(logits = logits.detach().cpu(), y=y2, k=k)
         stats["top%d_avg_acc"%k] = k_acc
         stats["top%d_avg_f1_score"%k] = k_f1
         stats["top%d_acc"%k] = k_acc
@@ -90,14 +107,14 @@ def get_loss(model, batch, params):
         
     return loss, stats
 
-def end_of_epoch(stats_list):
+def end_of_epoch(stats_list, val_first = True):
     scores = {}
-    for prefix, total_stats in zip(["val", "train"], stats_list):
+    for prefix, total_stats in zip(["val", "train"] if val_first else ["train","val"], stats_list):
         loss = []
         label_pred = []
         label_ids = []
             
-        label_ids_topK = { k : [] for k in range(1, params.topK+1)}
+        label_pred_topK = { k : [] for k in range(1, params.topK+1)}
             
         for stats in total_stats :
             label_pred.extend(stats["label_pred"])
@@ -105,14 +122,16 @@ def end_of_epoch(stats_list):
             loss.append(stats['loss'])
                 
             for k in range(1, params.topK+1):
-                label_ids_topK[k].extend(stats["top%d_label_pred"])
+                label_pred_topK[k].extend(stats["top%d_label_pred"])
 
         scores["%s_acc"%prefix] = get_acc(label_pred, label_ids) #accuracy_score(label_pred, label_ids)*100
         scores["%s_f1_score_weighted"%prefix] = f1_score_func(label_pred, label_ids)
-            
+        
+        print(label_pred, label_ids)
         for k in range(1, params.topK+1):
-            scores["top%d_%s_acc"%(k, prefix)] = get_acc(label_ids_topK[k], label_ids)
-            scores["top%d_%s_f1_score_weighted"%(k, prefix)] = f1_score_func(label_ids_topK[k], label_ids)
+            print(k, label_pred_topK[k], label_ids)
+            scores["top%d_%s_acc"%(k, prefix)] = get_acc(label_pred_topK[k], label_ids)
+            scores["top%d_%s_f1_score_weighted"%(k, prefix)] = f1_score_func(label_pred_topK[k], label_ids)
             
         #report = classification_report(y_true = label_ids, y_pred = label_pred, labels=label_dict.values(), 
         #    target_names=label_dict.keys(), sample_weight=None, digits=4, output_dict=True, zero_division='warn')
@@ -151,20 +170,28 @@ def main(params):
     init_signal_handler()
             
     model = BertClassifier(n_labels = 6, params = params, logger = logger)
+    model = model.to(params.device)
             
     train_dataset, val_dataset = load_dataset(params, logger, model.dico)
     #logger.info(model.dico.word2id)
     #exit()
     
     # optimizers
-    #params.optimizer_e = params.optimizer
-    params.optimizer_p = params.optimizer
-    if not params.freeze_transformer :
-        #optimizer_e = get_optimizer(model.model.parameters(), params.optimizer_e)
-        optimizer_p = get_optimizer(model.model.pred_layer.parameters(), params.optimizer_p)
+    if False :
+        lr= 1e-4
+        betas=(0.9, 0.999) 
+        weight_decay=0.01
+        optimizer_p = Adam(model.parameters(), lr=lr, betas=betas, weight_decay=weight_decay)
+        #optimizer_e = get_optimizer(model.model.parameters(), params.optimizer)
     else :
-        #optimizer_e =  None
-        optimizer_p = get_optimizer(model.model.pred_layer.parameters(), params.optimizer_p)
+        #params.optimizer_e = params.optimizer
+        params.optimizer_p = params.optimizer
+        if not params.freeze_transformer :
+            #optimizer_e = get_optimizer(model.model.parameters(), params.optimizer_e)
+            optimizer_p = get_optimizer(model.model.pred_layer.parameters(), params.optimizer_p)
+        else :
+            #optimizer_e =  None
+            optimizer_p = get_optimizer(model.model.pred_layer.parameters(), params.optimizer_p)
         
     trainer = Trainer(params, model, optimizer_p, train_dataset, val_dataset, logger)
     

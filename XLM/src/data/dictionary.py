@@ -13,7 +13,6 @@ from logging import getLogger
 
 logger = getLogger()
 
-
 BOS_WORD = '<s>'
 EOS_WORD = '</s>'
 PAD_WORD = '<pad>'
@@ -28,7 +27,7 @@ MASK_WORD = SPECIAL_WORD % 1
 
 class Dictionary(object):
 
-    def __init__(self, id2word, word2id, counts):
+    def __init__(self, id2word, word2id, counts, rest=4):
         assert len(id2word) == len(word2id) == len(counts)
         self.id2word = id2word
         self.word2id = word2id
@@ -37,6 +36,7 @@ class Dictionary(object):
         self.eos_index = word2id[EOS_WORD]
         self.pad_index = word2id[PAD_WORD]
         self.unk_index = word2id[UNK_WORD]
+        self.rest = rest
         self.check_valid()
 
     def __len__(self):
@@ -75,13 +75,13 @@ class Dictionary(object):
         assert self.eos_index == 1
         assert self.pad_index == 2
         assert self.unk_index == 3
-        assert all(self.id2word[4 + i] == SPECIAL_WORD % i for i in range(SPECIAL_WORDS))
+        assert all(self.id2word[self.rest + i] == SPECIAL_WORD % i for i in range(SPECIAL_WORDS))
         assert len(self.id2word) == len(self.word2id) == len(self.counts)
         assert set(self.word2id.keys()) == set(self.counts.keys())
         for i in range(len(self.id2word)):
             assert self.word2id[self.id2word[i]] == i
         last_count = 1e18
-        for i in range(4 + SPECIAL_WORDS, len(self.id2word) - 1):
+        for i in range(self.rest + SPECIAL_WORDS, len(self.id2word) - 1):
             count = self.counts[self.id2word[i]]
             assert count <= last_count
             last_count = count
@@ -117,7 +117,7 @@ class Dictionary(object):
         """
         assert min_count >= 0
         init_size = len(self)
-        self.id2word = {k: v for k, v in self.id2word.items() if self.counts[self.id2word[k]] >= min_count or k < 4 + SPECIAL_WORDS}
+        self.id2word = {k: v for k, v in self.id2word.items() if self.counts[self.id2word[k]] >= min_count or k < self.rest + SPECIAL_WORDS}
         self.word2id = {v: k for k, v in self.id2word.items()}
         self.counts = {k: v for k, v in self.counts.items() if k in self.word2id}
         self.check_valid()
@@ -125,15 +125,21 @@ class Dictionary(object):
                     % (min_count, init_size, len(self), init_size - len(self)))
 
     @staticmethod
-    def read_vocab(vocab_path):
+    def read_vocab(vocab_path, special_tokens=[]):
         """
         Create a dictionary from a vocabulary file.
         """
+        st = [BOS_WORD, EOS_WORD, PAD_WORD, UNK_WORD]
+        for t in special_tokens :
+            if t not in st:
+                st.append(t)    
+        rest = len(st)
+
         skipped = 0
         assert os.path.isfile(vocab_path), vocab_path
-        word2id = {BOS_WORD: 0, EOS_WORD: 1, PAD_WORD: 2, UNK_WORD: 3}
+        word2id = {t : i for i, t in enumerate(st)}
         for i in range(SPECIAL_WORDS):
-            word2id[SPECIAL_WORD % i] = 4 + i
+            word2id[SPECIAL_WORD % i] = rest + i
         counts = {k: 0 for k in word2id.keys()}
         f = open(vocab_path, 'r', encoding='utf-8')
         for i, line in enumerate(f):
@@ -155,11 +161,11 @@ class Dictionary(object):
                 skipped += 1
                 print('Empty word at line %s with count %s' % (i, line))
                 continue
-            word2id[line[0]] = 4 + SPECIAL_WORDS + i - skipped  # shift because of extra words
+            word2id[line[0]] = rest + SPECIAL_WORDS + i - skipped  # shift because of extra words
             counts[line[0]] = int(line[1])
         f.close()
         id2word = {v: k for k, v in word2id.items()}
-        dico = Dictionary(id2word, word2id, counts)
+        dico = Dictionary(id2word, word2id, counts, rest)
         logger.info("Read %i words from the vocabulary file." % len(dico))
         if skipped > 0:
             logger.warning("Skipped %i empty lines!" % skipped)
@@ -195,7 +201,7 @@ class Dictionary(object):
             for w in s:
                 word_id = dico.index(w, no_unk=False)
                 # if we find a special word which is not an unknown word, skip the sentence
-                if 0 <= word_id < 4 + SPECIAL_WORDS and word_id != 3:
+                if 0 <= word_id < dico.rest + SPECIAL_WORDS and word_id != 3:
                     logger.warning('Found unexpected special word "%s" (%i)!!' % (w, word_id))
                     continue
                 assert word_id >= 0

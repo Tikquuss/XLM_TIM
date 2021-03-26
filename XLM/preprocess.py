@@ -10,7 +10,7 @@
 
 
 """
-Example: python data/vocab.txt data/train.txt
+Example: python data/vocab.txt data/train.txt special_token1,...
 vocab.txt: 1stline=word, 2ndline=count
 """
 
@@ -28,10 +28,27 @@ if __name__ == '__main__':
     voc_path = sys.argv[1]
     txt_path = sys.argv[2]
     bin_path = sys.argv[2] + '.pth'
+    if len(sys.argv) > 3 :
+        special_tokens = sys.argv[3].split(",")
+    else :
+        special_tokens = []
+        
+    if True :
+        # bias corpus
+        URL="URL"
+        EMAIL="EMAIL"
+        PHONE_NUMBER="PHONE"
+        NUMBER="NUMBER"
+        DIGIT="DIGIT"
+        CUR="CUR" # currency_symbol
+        st = [URL, EMAIL, PHONE_NUMBER, NUMBER,DIGIT,CUR]
+        st = [s.lower() for s in st]
+        special_tokens.extend(st)
+        
     assert os.path.isfile(voc_path)
     assert os.path.isfile(txt_path)
 
-    dico = Dictionary.read_vocab(voc_path)
+    dico = Dictionary.read_vocab(voc_path, special_tokens)
     logger.info("")
 
     data = Dictionary.index_data(txt_path, bin_path, dico)

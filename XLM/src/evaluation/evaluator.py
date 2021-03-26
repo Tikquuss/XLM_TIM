@@ -676,7 +676,8 @@ class Evaluator(object):
 
             i = i + 1
             if i == 10 :
-                break
+                #break
+                pass
         # compute perplexity and prediction accuracy
         ppl_name = '%s_%s_mlm_ppl' % (data_set, l1l2)
         acc_name = '%s_%s_mlm_acc' % (data_set, l1l2)
@@ -854,7 +855,7 @@ import threading
 import time, math
 stop_threads = False
 def thread_target(cmd : str, wait : int = 0, timeout : int = None):
-    #128 = programme non lancé, 0 = programme était lancé, bien fermé
+    #128 = program not started, 0 = program was started, well closed
     os.system(cmd)
     if not timeout :
         timeout = math.inf
